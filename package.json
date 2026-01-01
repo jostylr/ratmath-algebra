@@ -1,12 +1,12 @@
 {
-    "name": "@ratmath/calc-common",
-    "version": "0.1.0",
+    "name": "@ratmath/algebra",
+    "version": "0.2.0",
     "description": "Common calculator logic and variable management for RatMath apps",
     "main": "src/index.js",
     "type": "module",
     "dependencies": {
-        "@ratmath/core": "workspace:*",
-        "@ratmath/parser": "workspace:*"
+        "@ratmath/core": "^0.2.0",
+        "@ratmath/parser": "^0.2.0"
     },
     "devDependencies": {
         "bun-types": "latest"
