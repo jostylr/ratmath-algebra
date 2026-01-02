@@ -521,10 +521,13 @@ export class VariableManager {
             let substituted = expression;
             for (const [varName, value] of this.variables) {
                 // Replace variable with its value, being careful about word boundaries
+                // We use 0d prefixes to ensure the value is treated as decimal and not re-preprocessed
+                // if the current input base is not 10.
+                const valStr = this.formatValueWithPrefix(value);
                 const pattern = new RegExp(`\\b${varName}\\b`, "g");
                 substituted = substituted.replace(
                     pattern,
-                    `(${this.formatValue(value)})`,
+                    `(${valStr})`,
                 );
             }
 
@@ -547,6 +550,40 @@ export class VariableManager {
                 message: error.message,
             };
         }
+    }
+
+    /**
+     * Format a value with 0d prefix for safe substitution in non-decimal bases
+     */
+    formatValueWithPrefix(value) {
+        if (!value) return "0";
+
+        if (value.type === "sequence") {
+            const formatted = value.values.map(v => this.formatValueWithPrefix(v));
+            return `[${formatted.join(", ")}]`;
+        }
+
+        if (value instanceof RationalInterval) {
+            return `${this.formatValueWithPrefix(value.low)}:${this.formatValueWithPrefix(value.high)}`;
+        }
+
+        // Handle numbers
+        let str;
+        if (value instanceof Rational) {
+            str = value.toString();
+        } else if (value instanceof Integer) {
+            str = value.value.toString();
+        } else {
+            str = value.toString();
+        }
+
+        // Prefix with 0d if it's a numeric string and not already prefixed
+        // We handle negatives by putting the prefix after the sign
+        if (/^-?[\d./]+$/.test(str) && !str.includes("0d")) {
+            return str.replace(/^(-)?/, "$10d");
+        }
+
+        return str;
     }
 
     /**
