@@ -57,67 +57,123 @@ export class VariableManager {
         // Regular expression to match bare numbers (not followed by [base])
         // Uses the valid characters for this specific base
         const numberPattern = new RegExp(
-            `\\b(-?[${validChars}]+(?:\\.[${validChars}]+)?(?:\\.\\.[${validChars}]+(?:\\/[${validChars}]+)?)?(?:\\/[${validChars}]+)?)\\b(?!\\s*\\[)`,
+            `\\b(-?[${validChars}]+(?:\\.[${validChars}]+)?(?:\\.\\.[${validChars}]+(?:\\/[${validChars}]+)?)?(?:\\/[${validChars}]+)?(?:\\_\\^-?[${validChars}]+)?)\\b(?!\\s*\\[)`,
             "g",
         );
 
         return expression.replace(numberPattern, (match) => {
             try {
-                // Normalize for case-insensitive bases (letters)
-                const normalize = (s) => (this.inputBase.base > 10 ? s.toLowerCase() : s);
+                // Normalize for case-insensitive bases (letters) i.e. Base <= 36
+                const normalize = (s) =>
+                    this.inputBase.base <= 36 && this.inputBase.base > 10
+                        ? s.toLowerCase()
+                        : s;
 
                 // Skip processing if it looks like a prefix notation (e.g., 0b..., 0x...)
                 // Strict prefix handling requires this to be passed to Parser
+                // Exception: if it is 0d, we might want to ensure it is handled? 
+                // But Parser handles prefixes fine.
                 if (/^-?0[a-zA-Z]/.test(match)) {
                     return match;
                 }
 
-                // Handle mixed numbers: whole..num/den
-                if (match.includes("..")) {
-                    const [whole, fraction] = match.split("..");
-                    const wholeDec = this.inputBase.toDecimal(normalize(whole));
-                    if (fraction.includes("/")) {
-                        const [num, den] = fraction.split("/");
+                // Helper to parse a standard number string (int, decimal, fraction) to Rational
+                const parseToRational = (str) => {
+                    // Handle mixed numbers: whole..num/den
+                    if (str.includes("..")) {
+                        const [whole, fraction] = str.split("..");
+                        const wholeDec = this.inputBase.toDecimal(normalize(whole));
+                        if (fraction.includes("/")) {
+                            const [num, den] = fraction.split("/");
+                            const numDec = this.inputBase.toDecimal(normalize(num));
+                            const denDec = this.inputBase.toDecimal(normalize(den));
+                            // whole + num/den
+                            const w = new Rational(wholeDec);
+                            const n = new Rational(numDec);
+                            const d = new Rational(denDec);
+                            return w.add(n.divide(d));
+                        } else {
+                            const fracDec = this.inputBase.toDecimal(normalize(fraction));
+                            // Ambiguous: whole..frac? usually means whole + frac/base^len
+                            // But original code returned string.
+                            // We need Value.
+                            // Re-implement logic: 'whole' numeric + 'fraction' numeric?
+                            // No, typically whole..num is mixed fraction.
+                            // Original code line 85: wholeDec..fracDec.
+                            // It returned STRING. Parser parsed it.
+                            // If we want Value, we must interpret it.
+                            // Assuming RatMath parser handles `whole..frac` as Mixed.
+                            // Let's defer to original logic: parse to string, then wrap in 0d?
+                            // But `0d3..4` is valid?
+                            // Yes if Parser handles it. 
+                            // BUT `0d` enforces Decimal. `3..4` in Decimal is 3 + 4/10?
+                            // Original logic converted parts to Decimal.
+                            // So `a..b` (Hex) -> `10..11`.
+                            // `0d10..11`. Parser parses `10` mixed `11`.
+                            // `10 + 11/100`?
+                            // Is that correct meaning?
+                            // Probably.
+
+                            // Let's stick to parsing segments to decimal strings and reconstructing the string.
+                            return `${wholeDec}..${fracDec}`;
+                        }
+                    }
+
+                    // Handle simple fractions: num/den
+                    if (str.includes("/") && !str.includes(".")) {
+                        const [num, den] = str.split("/");
                         const numDec = this.inputBase.toDecimal(normalize(num));
                         const denDec = this.inputBase.toDecimal(normalize(den));
-                        return `${wholeDec}..${numDec}/${denDec}`;
-                    } else {
-                        const fracDec = this.inputBase.toDecimal(normalize(fraction));
-                        return `${wholeDec}..${fracDec}`;
-                    }
-                }
-
-                // Handle simple fractions: num/den
-                if (match.includes("/") && !match.includes(".")) {
-                    const [num, den] = match.split("/");
-                    const numDec = this.inputBase.toDecimal(normalize(num));
-                    const denDec = this.inputBase.toDecimal(normalize(den));
-                    return `${numDec}/${denDec}`;
-                }
-
-                // Handle decimals: int.frac
-                if (match.includes(".")) {
-                    const [intStr, fracStr] = match.split(".");
-                    const isNegative = intStr.startsWith("-");
-
-                    let val = new Rational(this.inputBase.toDecimal(normalize(intStr)));
-                    const base = BigInt(this.inputBase.base);
-                    let divisor = base;
-
-                    for (const char of fracStr) {
-                        // Use toDecimal for single char to get its numeric value
-                        const digitValue = this.inputBase.toDecimal(normalize(char));
-                        const term = new Rational(digitValue, divisor);
-                        val = isNegative ? val.subtract(term) : val.add(term);
-                        divisor *= base;
+                        return `${numDec}/${denDec}`;
                     }
 
-                    // Return as a standard fractional representation that the decimal parser understands
-                    return val.toString();
+                    // Handle decimals: int.frac
+                    if (str.includes(".")) {
+                        const [intStr, fracStr] = str.split(".");
+                        const isNegative = intStr.startsWith("-");
+
+                        // Use existing logic to convert decimal to Rational string
+                        let val = new Rational(this.inputBase.toDecimal(normalize(intStr)));
+                        const base = BigInt(this.inputBase.base);
+                        let divisor = base;
+
+                        for (const char of fracStr) {
+                            const digitValue = this.inputBase.toDecimal(normalize(char));
+                            const term = new Rational(digitValue, divisor);
+                            val = isNegative ? val.subtract(term) : val.add(term);
+                            divisor *= base;
+                        }
+                        return val.toString();
+                    }
+
+                    // Handle simple integers
+                    let targetStr = str;
+                    let isNeg = false;
+                    if (targetStr.startsWith("-")) {
+                        isNeg = true;
+                        targetStr = targetStr.substring(1);
+                    }
+                    const val = this.inputBase.toDecimal(normalize(targetStr));
+                    return isNeg ? (-val).toString() : val.toString();
+                };
+
+                // Helper to format with 0d prefix handling negatives
+                const toPrefixed0d = (s) => s.startsWith("-") ? `-0d${s.substring(1)}` : `0d${s}`;
+
+                // Check for Scientific Notation _^
+                if (match.includes("_^")) {
+                    const [basePart, expPart] = match.split("_^");
+                    const baseValStr = parseToRational(basePart);
+                    const expValStr = parseToRational(expPart);
+                    // Construct expression: (Base) * (SystemBase) ^ (Exp)
+                    return `(${toPrefixed0d(baseValStr)}) * (${toPrefixed0d(this.inputBase.base.toString())}) ^ (${toPrefixed0d(expValStr)})`;
                 }
 
-                // Handle simple integers
-                return this.inputBase.toDecimal(normalize(match)).toString();
+                // Standard Number
+                const valStr = parseToRational(match);
+                // Return with 0d prefix to strip context
+                return toPrefixed0d(valStr);
+
             } catch (error) {
                 // If conversion fails for any part, return as-is
                 return match;
@@ -478,7 +534,8 @@ export class VariableManager {
             // Parse and evaluate
             const result = Parser.parse(preprocessed, {
                 typeAware: true,
-                customBases: this.customBases
+                customBases: this.customBases,
+                inputBase: this.inputBase
             });
             return {
                 type: "expression",
