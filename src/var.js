@@ -66,6 +66,12 @@ export class VariableManager {
                 // Normalize for case-insensitive bases (letters)
                 const normalize = (s) => (this.inputBase.base > 10 ? s.toLowerCase() : s);
 
+                // Skip processing if it looks like a prefix notation (e.g., 0b..., 0x...)
+                // Strict prefix handling requires this to be passed to Parser
+                if (/^-?0[a-zA-Z]/.test(match)) {
+                    return match;
+                }
+
                 // Handle mixed numbers: whole..num/den
                 if (match.includes("..")) {
                     const [whole, fraction] = match.split("..");
