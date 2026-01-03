@@ -97,7 +97,7 @@ export class VariableManager {
         // Uses the valid characters for this specific base
         // Also captures uncertainty notation like 1.23[45:67] to avoid misidentifying parts of it
         const numberPattern = new RegExp(
-            `\\b(-?[${validChars}]+(?:\\.[${validChars}]*)?(?:\\.\\.[${validChars}]+(?:\\/[${validChars}]+)?)?(?:\\/[${validChars}]+)?(?:\\_\\^-?[${validChars}]+)?)(?:\\[([^\\]]+)\\](?:[Ee][+-]?[${validChars}]+|\\_\\^-?[${validChars}]+)?|\\b(?!\\s*\\[))`,
+            `\\b(-?[${validChars}0-9a-zA-Z]+(?:\\.[${validChars}0-9a-zA-Z]*)?(?:\\.\\.[${validChars}0-9a-zA-Z]+(?:\\/[${validChars}0-9a-zA-Z]+)?)?(?:\\/[${validChars}0-9a-zA-Z]+)?(?:\\_\\^-?[${validChars}0-9a-zA-Z]+)?)(?:\\[([^\\]]+)\\](?:[Ee][+-]?[${validChars}0-9a-zA-Z]+|\\_\\^-?[${validChars}0-9a-zA-Z]+)?|\\b(?!\\s*\\[))`,
             "g",
         );
 
