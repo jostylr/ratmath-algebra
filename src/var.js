@@ -296,7 +296,7 @@ export class VariableManager {
 
                     if (isDigit) {
                         // Ambiguous! Function vs Digit.
-                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for function or explicit base prefix (e.g. 0d${name} or 0x${name}) for number.`);
+                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for function or explicit base prefix (e.g. 0D${name} or 0x${name}) for number.`);
                     }
 
                     const f = this.functions.get(normalizedName);
@@ -626,10 +626,12 @@ export class VariableManager {
                 const rest = baseCommandMatch[2];
                 let tempBase = null;
 
-                if (command === "HEX" || command === "0x") tempBase = BaseSystem.HEXADECIMAL;
-                else if (command === "BIN" || command === "0b") tempBase = BaseSystem.BINARY;
-                else if (command === "OCT" || command === "0o") tempBase = BaseSystem.OCTAL;
-                else if (command === "DEC" || command === "0d") tempBase = BaseSystem.DECIMAL;
+                const upperCommand = command.toUpperCase();
+                if (upperCommand === "HEX" || upperCommand === "0X") tempBase = BaseSystem.HEXADECIMAL;
+                else if (upperCommand === "BIN" || upperCommand === "0B") tempBase = BaseSystem.BINARY;
+                else if (upperCommand === "OCT" || upperCommand === "0O") tempBase = BaseSystem.OCTAL;
+                else if (upperCommand === "DEC" || command === "0d") tempBase = BaseSystem.DECIMAL;
+                // Note: 0D as a command is handled by falling through (stays as default base)
                 else if (command.startsWith("BASE")) {
                     const match = command.match(/^BASE(\d+)$/);
                     if (match) {
@@ -777,7 +779,7 @@ export class VariableManager {
                     }
 
                     if (isDigit && !hasPrefix) {
-                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for function or explicit base prefix (e.g. 0d${name} or 0x${name}) for number.`);
+                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for function or explicit base prefix (e.g. 0D${name} or 0x${name}) for number.`);
                     }
 
                     // 2. Allow Function as Value (strictness relaxed for HOC)
@@ -804,7 +806,7 @@ export class VariableManager {
                         // Ambiguous! defined variable/function AND valid number.
                         // STRICTNESS: Throw Error.
                         const type = isVar ? "variable" : "function";
-                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for ${type} or explicit base prefix (e.g. 0d${name} or 0x${name}) for number.`);
+                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for ${type} or explicit base prefix (e.g. 0D${name} or 0x${name}) for number.`);
                     } else {
                         // Not a digit (or base doesn't support letters), so it's safe to substitute.
                         if (isFunc) return `${prefixChar}${valStr}`;
