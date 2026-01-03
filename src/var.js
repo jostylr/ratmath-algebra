@@ -95,12 +95,17 @@ export class VariableManager {
 
         // Regular expression to match bare numbers (not followed by [base])
         // Uses the valid characters for this specific base
+        // Also captures uncertainty notation like 1.23[45:67] to avoid misidentifying parts of it
         const numberPattern = new RegExp(
-            `\\b(-?[${validChars}]+(?:\\.[${validChars}]+)?(?:\\.\\.[${validChars}]+(?:\\/[${validChars}]+)?)?(?:\\/[${validChars}]+)?(?:\\_\\^-?[${validChars}]+)?)\\b(?!\\s*\\[)`,
+            `\\b(-?[${validChars}]+(?:\\.[${validChars}]+)?(?:\\.\\.[${validChars}]+(?:\\/[${validChars}]+)?)?(?:\\/[${validChars}]+)?(?:\\_\\^-?[${validChars}]+)?)(?:\\[([^\\]]+)\\](?:[Ee][+-]?[${validChars}]+|\\_\\^-?[${validChars}]+)?|\\b(?!\\s*\\[))`,
             "g",
         );
 
-        return expression.replace(numberPattern, (match) => {
+        return expression.replace(numberPattern, (match, baseValue, uncertainty) => {
+            if (uncertainty) {
+                // If it's uncertainty notation, return as is (Parser will handle it)
+                return match;
+            }
             try {
                 // Normalize for case-insensitive bases (letters) i.e. Base <= 36
                 const normalize = (s) =>
