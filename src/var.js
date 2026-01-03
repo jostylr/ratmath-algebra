@@ -97,7 +97,7 @@ export class VariableManager {
         // Uses the valid characters for this specific base
         // Also captures uncertainty notation like 1.23[45:67] to avoid misidentifying parts of it
         const numberPattern = new RegExp(
-            `\\b(-?[${validChars}]+(?:\\.[${validChars}]+)?(?:\\.\\.[${validChars}]+(?:\\/[${validChars}]+)?)?(?:\\/[${validChars}]+)?(?:\\_\\^-?[${validChars}]+)?)(?:\\[([^\\]]+)\\](?:[Ee][+-]?[${validChars}]+|\\_\\^-?[${validChars}]+)?|\\b(?!\\s*\\[))`,
+            `\\b(-?[${validChars}]+(?:\\.[${validChars}]*)?(?:\\.\\.[${validChars}]+(?:\\/[${validChars}]+)?)?(?:\\/[${validChars}]+)?(?:\\_\\^-?[${validChars}]+)?)(?:\\[([^\\]]+)\\](?:[Ee][+-]?[${validChars}]+|\\_\\^-?[${validChars}]+)?|\\b(?!\\s*\\[))`,
             "g",
         );
 
@@ -662,7 +662,8 @@ export class VariableManager {
             let substitutedFunctions = expression;
 
             // Function Call Substitution
-            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@?[A-Z][a-zA-Z0-9]*))\s*\(/g;
+            // Function Call Substitution - Allow [a-zA-Z] to support HOC aliases
+            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@?[a-zA-Z][a-zA-Z0-9]*))\s*\(/g;
             let match;
             while ((match = functionCallRegex.exec(substitutedFunctions)) !== null) {
                 const fullMatch = match[0];
@@ -839,9 +840,18 @@ export class VariableManager {
                 });
             } catch (parseError) {
                 const trimmed = preprocessed.trim();
-                const rawName = trimmed.startsWith("@") ? trimmed.substring(1) : trimmed;
-                if (this.functions.has(rawName)) {
-                    return { type: "expression", result: rawName };
+                // Check if any token looks like a function name
+                const tokens = trimmed.split(/[^a-zA-Z0-9@]/).filter(t => t.length > 0);
+                for (const token of tokens) {
+                    const rawName = token.startsWith("@") ? token.substring(1) : token;
+                    if (this.functions.has(rawName)) {
+                        // If it's just the function name (standalone), it might be valid for HOC (return below)
+                        // If it's part of a larger failing expression, it's an error.
+                        if (tokens.length > 1 || trimmed.includes("(") || trimmed.includes(")")) {
+                            throw new Error(`Function '${rawName}' cannot be used as a value in this context`);
+                        }
+                        return { type: "expression", result: rawName };
+                    }
                 }
                 throw parseError;
             }
