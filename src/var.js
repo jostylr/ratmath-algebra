@@ -12,12 +12,16 @@ export class VariableManager {
     constructor() {
         this.variables = new Map(); // Store single-character variables
         this.functions = new Map(); // Store function definitions
+        this.modules = new Map();   // Store loaded modules { name: string, content: object }
         this.inputBase = null; // Base system for interpreting numbers without explicit base notation
         this.customBases = new Map(); // Store custom base definitions
 
         // Regex patterns for validation
-        this.variablePattern = /^(?:@?([a-z][a-zA-Z0-9]*))$/;
-        this.functionPattern = /^(?:@?([A-Z][a-zA-Z0-9]*))$/;
+        // Updated to support namespacing: @@Module@Name
+        // Variable: starts with lowercase, optional @@Mod@ prefix
+        this.variablePattern = /^(?:@@[a-zA-Z0-9_]+@)?(?:@?([a-z][a-zA-Z0-9_]*))$/;
+        // Function: starts with uppercase, optional @@Mod@ prefix
+        this.functionPattern = /^(?:@@[a-zA-Z0-9_]+@)?(?:@?([A-Z][a-zA-Z0-9_]*))$/;
     }
 
     /**
@@ -44,7 +48,7 @@ export class VariableManager {
      * @param {string[]} params - List of parameter names
      * @param {string} body - Function body expression
      */
-    defineFunction(name, params, body) {
+    defineFunction(name, params, body, doc = "") {
         if (!this.functionPattern.test(name)) {
             // Check if it looks like a variable name
             if (this.variablePattern.test(name)) {
@@ -52,7 +56,113 @@ export class VariableManager {
             }
             throw new Error(`Invalid function name '${name}'. Functions must start with an Uppercase letter or @Uppercase.`);
         }
-        this.functions.set(name, { params, body });
+        this.functions.set(name, { params, body, doc, type: 'def' });
+    }
+
+    /**
+     * Register a JavaScript function
+     * @param {string} name - Function name
+     * @param {Function} handler - JS function to execute
+     * @param {string[]} params - Parameter names (for help/signature)
+     * @param {string} doc - Documentation string
+     */
+    registerJSFunction(name, handler, params, doc = "") {
+        if (!this.functionPattern.test(name)) {
+            throw new Error(`Invalid function name '${name}'. Functions must start with an Uppercase letter.`);
+        }
+        this.functions.set(name, { type: 'js', handler, params, doc });
+    }
+
+    /**
+     * Get help/documentation for a function
+     * @param {string} [name] - Function name (optional)
+     * @returns {string} - Help text
+     */
+    getHelp(name) {
+        if (name) {
+            const normalized = name.startsWith("@@") ? name : (name.startsWith("@") ? name.substring(1) : name);
+            if (this.functions.has(normalized)) {
+                const f = this.functions.get(normalized);
+                const sig = `${normalized}(${f.params.join(", ")})`;
+                return `${sig}\n${f.doc || "No documentation available."}`;
+            }
+            return `Function '${name}' not found.`;
+        }
+
+        // List all functions with short doc
+        const entries = [];
+        for (const [fname, f] of this.functions) {
+            let snippet = f.doc ? f.doc.split('\n')[0] : "";
+            if (snippet.length > 50) snippet = snippet.substring(0, 47) + "...";
+            entries.push(`${fname}(${f.params.join(",")}) - ${snippet}`);
+        }
+        return `Available Functions:\n${entries.join('\n')}`;
+    }
+
+    /**
+     * Load a module into the current namespace
+     * @param {string} moduleName - Name of the module (e.g. "Core")
+     * @param {object} scope - Object containing vars and functions to load
+     */
+    loadModule(moduleName, scope) {
+        const prefix = `@@${moduleName}@`;
+
+        // Register functions
+        if (scope.functions) {
+            for (const [name, def] of Object.entries(scope.functions)) {
+                const qualifiedName = `${prefix}${name}`;
+                this.functions.set(qualifiedName, { ...def });
+                // Also alias simple name if not conflicting?
+                // User said: "LOAD @@Module to put all the functions and variables in the Module in the current active space"
+                // This implies making them available WITHOUT prefix too?
+                // "Also a command LOAD @@Module to put all ... in the current active space"
+                // And "namespacing convention of @@Module@Func ... so @@ is for Module name"
+                // I'll assume LOAD makes them available as `Name` (overwriting?) AND `@@Module@Name` is always available if module is known?
+                // Or maybe LOAD copies them to main namespace.
+
+                // Let's implement LOAD as: Import scoped items into main namespace.
+                // The @@Module@Name convention might be for storage or direct access?
+                // If I store them as `@@Module@Name`, user has to type that. 
+                // LOAD matches "using namespace" in C++.
+
+                // Let's store as fully qualified, and also create aliases in main map.
+                this.functions.set(name, { ...def, isImported: true, module: moduleName });
+            }
+        }
+
+        // Register variables
+        if (scope.variables) {
+            for (const [name, val] of Object.entries(scope.variables)) {
+                const qualifiedName = `${prefix}${name}`;
+                this.variables.set(qualifiedName, val);
+                this.variables.set(name, val);
+            }
+        }
+
+        this.modules.set(moduleName, scope);
+        return `Module '${moduleName}' loaded.`;
+    }
+
+    /**
+     * Unload a module (remove imported aliases)
+     */
+    unloadModule(moduleName) {
+        if (!this.modules.has(moduleName)) return `Module '${moduleName}' not loaded.`;
+
+        let count = 0;
+        // Remove functions tagged with this module (aliases)
+        for (const [name, def] of this.functions) {
+            if (def.isImported && def.module === moduleName) {
+                this.functions.delete(name);
+                count++;
+            }
+        }
+        // Remove variables? (Metadata for vars needed)
+        // For now, only removing functions is safer as vars are simple values.
+        // We might want to track refined vars.
+
+        this.modules.delete(moduleName);
+        return `Module '${moduleName}' unloaded (${count} functions removed).`;
     }
 
     /**
@@ -406,17 +516,27 @@ export class VariableManager {
      * Handle function definition
      */
     handleFunctionDefinition(funcName, params, body) {
-        // Validate parameters are single characters
+        // Validate parameters
+        // Modified: Allow multi-character params, rely on case for type checking in calls.
+        if (params.length === 0) {
+            // 0 params ok
+        }
+        // Check duplicates
+        if (new Set(params).size !== params.length) {
+            return { type: "error", message: "Duplicate parameter names" };
+        }
+
+        // Check format
         for (const param of params) {
-            if (param.length !== 1 || !/[a-zA-Z]/.test(param)) {
+            if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(param)) {
                 return {
                     type: "error",
-                    message: `Function parameters must be single letters, got: ${param}`,
+                    message: `Invalid parameter name '${param}'. Must start with letter.`
                 };
             }
         }
 
-        this.functions.set(funcName, { params, body });
+        this.functions.set(funcName, { params, body, type: 'def', doc: `User defined function: ${body}` });
         return {
             type: "function",
             result: null,
@@ -436,7 +556,34 @@ export class VariableManager {
         }
 
         const func = this.functions.get(funcName);
-        const args = argsStr.trim() ? argsStr.split(",").map((s) => s.trim()) : [];
+
+        // JS Function Handler shortcut
+        if (func.type === 'js') {
+            // Still need to parse args!
+            // We reuse the parsing logic below.
+        }
+
+        // Basic arg splitting - need to be smarter to respect parens if not already?
+        // Actually handleFunctionCall receives argsStr which is inner parens.
+        // We need to split by comma, respecting sub-balanced-parens/brackets.
+
+        const args = [];
+        let currentArg = "";
+        let depth = 0;
+        for (let i = 0; i < argsStr.length; i++) {
+            const char = argsStr[i];
+            if (char === '(' || char === '[' || char === '{') depth++;
+            else if (char === ')' || char === ']' || char === '}') depth--;
+
+            if (char === ',' && depth === 0) {
+                args.push(currentArg.trim());
+                currentArg = "";
+            } else {
+                currentArg += char;
+            }
+        }
+        if (currentArg.trim() !== "") args.push(currentArg.trim());
+
 
         if (args.length !== func.params.length) {
             return {
@@ -446,38 +593,107 @@ export class VariableManager {
         }
 
         try {
-            // Evaluate arguments
+            // Evaluate arguments with Strict Typing and Lambda support
             const argValues = [];
-            for (const arg of args) {
-                const result = this.evaluateExpression(arg);
-                if (result.type === "error") {
-                    return result;
+
+            for (let i = 0; i < args.length; i++) {
+                const argRaw = args[i];
+                const paramName = func.params[i];
+
+                // STRICTNESS CHECK: Parameter Case
+                const isParamFunction = /^[A-Z]/.test(paramName); // Uppercase = expects Function
+                const isParamValue = /^[a-z]/.test(paramName);     // Lowercase = expects Value
+
+                // CHECK FOR EXPLICIT LAMBDA: "var -> expr"
+                const lambdaMatch = argRaw.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
+
+                if (lambdaMatch) {
+                    if (!isParamFunction) {
+                        // Case: Parameter is lowercase (value), but passed lambda.
+                        throw new Error(`Argument mismatch for '${paramName}': Expected value (compatible with lowercase), got Lambda function.`);
+                    }
+
+                    // Create Anonymous Function
+                    const [, lambdaParam, lambdaBody] = lambdaMatch;
+                    // Use namespaced Format: @@Anon@<Timestamp>_<Random>
+                    // This satisfies the functionCallRegex logic.
+                    const anonName = `@@Anon@${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+                    this.functions.set(anonName, {
+                        params: [lambdaParam.trim()],
+                        body: lambdaBody.trim(),
+                        type: 'def',
+                        doc: 'Anonymous Lambda'
+                    });
+                    argValues.push(anonName);
+                    continue;
                 }
+
+                // Normal Evaluation
+                // Special handling if expecting function: preserve name if simple identifier
+                if (isParamFunction) {
+                    const trimmed = argRaw.trim();
+                    // If it is a simple identifier, check if it is a function
+                    // Regex must allow @@Mod@Name format
+                    if (/^(?:@@[a-zA-Z0-9_]+@)?@?[a-zA-Z0-9_]+$/.test(trimmed)) {
+                        // Normalize: strip @ but respect @@
+                        const norm = trimmed.startsWith("@@") ? trimmed : (trimmed.startsWith("@") ? trimmed.substring(1) : trimmed);
+                        if (this.functions.has(norm)) {
+                            argValues.push(norm);
+                            continue;
+                        } else {
+                            // Not found function
+                            throw new Error(`Argument mismatch for '${paramName}': Expected existing function, got unknown '${trimmed}'`);
+                        }
+                    } else {
+                        throw new Error(`Argument mismatch for '${paramName}': Expected function name or lambda, got expression.`);
+                    }
+                }
+
+                // Expecting Value
+                const result = this.evaluateExpression(argRaw);
+                if (result.type === "error") return result;
+
+                // Sanity check: Ensure not a function name string being passed for a value assumption?
+                // The prompt says "Variables or expressions that resolve to stuff that is compatible with lower case letter variables".
+                // Basically data values.
                 argValues.push(result.result);
             }
 
+            if (func.type === 'js') {
+                // Execute JS Handler
+                try {
+                    const res = func.handler(...argValues);
+                    return { type: 'expression', result: res };
+                } catch (e) {
+                    return { type: 'error', message: `JS Function ${funcName} error: ${e.message}` };
+                }
+            }
+
+            // Standard Function Evaluation
             // Create temporary variable bindings
             const oldValues = new Map();
+            // Also need to bind function aliases if passing functions!
+            // If param is F, and we pass "Sin", inside body F(x) calls Sin(x).
+            // We need to register F as alias to Sin temporarily.
+            // Or use localScope? evaluateExpression supports localScope.
+            // But currently localScope is single map (name -> value).
+            // Logic in evaluateExpression looks up localScope -> if string -> checks function map. (HOC Logic).
+
+            const callBindScope = new Map();
+
             for (let i = 0; i < func.params.length; i++) {
                 const param = func.params[i];
-                if (this.variables.has(param)) {
-                    oldValues.set(param, this.variables.get(param));
-                }
-                this.variables.set(param, argValues[i]);
+                callBindScope.set(param, argValues[i]);
             }
 
-            // Evaluate function expression
-            const result = this.evaluateExpression(func.body);
+            // Local Scope handling in evaluateExpression is sufficient for HOC if we pass map
+            const result = this.evaluateExpression(func.body, callBindScope);
 
-            // Restore old variable values
-            for (const [param, oldValue] of oldValues) {
-                this.variables.set(param, oldValue);
-            }
-            for (const param of func.params) {
-                if (!oldValues.has(param)) {
-                    this.variables.delete(param);
-                }
-            }
+            // Clean up anonymous functions? 
+            // Currently they leak into global map. 
+            // Ideally we track them and delete, but GC is hard here without extensive tracking.
+            // unique names prevent conflict.
 
             return result;
         } catch (error) {
@@ -663,7 +879,8 @@ export class VariableManager {
 
             // Function Call Substitution
             // Function Call Substitution - Allow [a-zA-Z] to support HOC aliases
-            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@?[a-zA-Z][a-zA-Z0-9]*))\s*\(/g;
+            // Updated Regex for Namespaces: (@@Mod@Name)
+            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[a-zA-Z][a-zA-Z0-9_]*))\s*\(/g;
             let match;
             while ((match = functionCallRegex.exec(substitutedFunctions)) !== null) {
                 const fullMatch = match[0];
@@ -686,15 +903,15 @@ export class VariableManager {
 
                 if (closeParenIndex !== -1) {
                     const argsStr = substitutedFunctions.substring(openParenIndex + 1, closeParenIndex);
-                    // Normalize function name for lookup (strip @)
-                    const normalizedFuncName = funcName.startsWith("@") ? funcName.substring(1) : funcName;
+                    // Normalize function name for lookup (strip @ but respect @@)
+                    const normalizedFuncName = funcName.startsWith("@@") ? funcName : (funcName.startsWith("@") ? funcName.substring(1) : funcName);
                     let funcDef = this.functions.get(normalizedFuncName);
 
                     // HOC Logic: If not found, check if it's a local variable (param) that holds a function name
                     if (!funcDef && localScope.has(normalizedFuncName)) {
                         const possibleAlias = localScope.get(normalizedFuncName);
                         if (typeof possibleAlias === 'string') {
-                            const aliasNorm = possibleAlias.startsWith("@") ? possibleAlias.substring(1) : possibleAlias;
+                            const aliasNorm = possibleAlias.startsWith("@@") ? possibleAlias : (possibleAlias.startsWith("@") ? possibleAlias.substring(1) : possibleAlias);
                             if (this.functions.has(aliasNorm)) {
                                 funcDef = this.functions.get(aliasNorm);
                             }
@@ -726,9 +943,55 @@ export class VariableManager {
 
                         const callBindScope = new Map();
                         for (let i = 0; i < funcDef.params.length; i++) {
-                            const argResult = this.evaluateExpression(args[i], localScope);
+                            const paramName = funcDef.params[i];
+                            const argRaw = args[i];
+
+                            // STRICTNESS CHECK: Parameter Case
+                            const isParamFunction = /^[A-Z]/.test(paramName); // Uppercase = expects Function
+
+                            // CHECK FOR EXPLICIT LAMBDA: "var -> expr"
+                            const lambdaMatch = argRaw.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
+
+                            if (lambdaMatch) {
+                                if (!isParamFunction) {
+                                    throw new Error(`Argument mismatch for '${paramName}': Expected value, got Lambda function.`);
+                                }
+                                const [, lambdaParam, lambdaBody] = lambdaMatch;
+                                // Use namespaced Format compatible with evaluateExpression regex
+                                const anonName = `@@Anon@${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+                                this.functions.set(anonName, {
+                                    params: [lambdaParam.trim()],
+                                    body: lambdaBody.trim(),
+                                    type: 'def',
+                                    doc: 'Anonymous Lambda'
+                                });
+                                callBindScope.set(paramName, anonName);
+                                continue;
+                            }
+
+                            if (isParamFunction) {
+                                const trimmed = argRaw.trim();
+                                if (/^(?:@@[a-zA-Z0-9_]+@)?@?[a-zA-Z0-9_]+$/.test(trimmed)) {
+                                    const norm = trimmed.startsWith("@@") ? trimmed : (trimmed.startsWith("@") ? trimmed.substring(1) : trimmed);
+                                    if (this.functions.has(norm)) {
+                                        callBindScope.set(paramName, norm);
+                                        continue;
+                                    } else {
+                                        // Allow passing valid identifier if strictness relaxed? 
+                                        // NO, strictness requires function existence check unless we defer?
+                                        // User wants strict check.
+                                        throw new Error(`Argument mismatch for '${paramName}': Expected existing function, got unknown '${trimmed}'`);
+                                    }
+                                } else {
+                                    throw new Error(`Argument mismatch for '${paramName}': Expected function name or lambda, got expression.`);
+                                }
+                            }
+
+                            // Expecting Value
+                            const argResult = this.evaluateExpression(argRaw, localScope);
                             if (argResult.type === "error") throw new Error(argResult.message);
-                            callBindScope.set(funcDef.params[i], argResult.result);
+                            callBindScope.set(paramName, argResult.result);
                         }
 
                         const bodyResult = this.evaluateExpression(funcDef.body, callBindScope);
@@ -755,13 +1018,14 @@ export class VariableManager {
             // We need to identify tokens that look like variables in the expression.
             // A potential variable token matches [a-zA-Z][a-zA-Z0-9]* or @[a-zA-Z][a-zA-Z0-9]*
             // We'll iterate through matches and make substitution decisions based on strictness rules.
+            // Updated Regex for Namespaces: (@@Mod@Name)
 
-            substituted = substituted.replace(/(^|[^a-zA-Z0-9])(@?)([a-zA-Z][a-zA-Z0-9]*)/g, (match, prefixChar, atSign, name) => {
+            substituted = substituted.replace(/(^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?)(@?)([a-zA-Z][a-zA-Z0-9_]*)/g, (match, prefixChar, namespaceInfo, atSign, name) => {
+                const fullIdentifier = `${namespaceInfo}${name}`;
                 // Unified Identity: variables and functions
                 // Check Variables
-                const normalizedName = name;
-                const isVar = allVars.has(normalizedName);
-                const isFunc = this.functions.has(normalizedName);
+                const isVar = allVars.has(fullIdentifier);
+                const isFunc = this.functions.has(fullIdentifier);
                 const hasPrefix = atSign === "@";
 
                 if (!isVar && !isFunc) {
@@ -771,7 +1035,7 @@ export class VariableManager {
 
                 let valStr;
                 if (isVar) {
-                    const value = allVars.get(normalizedName);
+                    const value = allVars.get(fullIdentifier);
                     valStr = this.formatValueWithPrefix(value);
                 } else if (isFunc) {
                     // Function used as value (not called with parens)
@@ -781,7 +1045,11 @@ export class VariableManager {
                         const validChars = this.inputBase.base > 10
                             ? this.inputBase.characters.concat(this.inputBase.characters.filter(c => /[a-z]/.test(c)).map(c => c.toUpperCase()))
                             : this.inputBase.characters;
-                        isDigit = [...name].every(c => validChars.includes(c));
+                        // For namespace things (@@), they are never digits.
+                        // Only check simple names.
+                        if (!namespaceInfo) {
+                            isDigit = [...name].every(c => validChars.includes(c));
+                        }
                     }
 
                     if (isDigit && !hasPrefix) {
@@ -789,7 +1057,7 @@ export class VariableManager {
                     }
 
                     // 2. Allow Function as Value (strictness relaxed for HOC)
-                    valStr = normalizedName;
+                    valStr = fullIdentifier;
                 }
 
                 // Strictness Logic:
@@ -799,7 +1067,9 @@ export class VariableManager {
                     const validChars = this.inputBase.base > 10
                         ? this.inputBase.characters.concat(this.inputBase.characters.filter(c => /[a-z]/.test(c)).map(c => c.toUpperCase()))
                         : this.inputBase.characters;
-                    isDigit = [...name].every(c => validChars.includes(c));
+                    if (!namespaceInfo) {
+                        isDigit = [...name].every(c => validChars.includes(c));
+                    }
                 }
 
                 if (hasPrefix) {
