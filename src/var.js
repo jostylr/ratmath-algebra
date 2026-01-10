@@ -569,175 +569,48 @@ export class VariableManager {
                 };
             }
             paramSet.add(clean);
+
+            // Ambiguity Check: Is this parameter name a valid number in current base?
+            // Ambiguity Check: Is this parameter name a valid number in current base?
+            // e.g. 'a' in HEX is 10.
+            // We can use evaluateExpression to check if it parses as number
+            // But variable has priority in eval...
+            // We need to check if it *looks* like a number digit in current base.
+            // Simple regex check based on base?
+            // Or use Parser.parseBaseNotation? 
+            // If I evaluate "a" in empty scope...
+            // eval("a", {}) -> if it returns number, it's ambiguous.
+            // But wait, eval("a") will fail lookup if empty scope.
+            // Unless it parses as number first.
+            try {
+                const res = this.evaluateExpression(clean, new Map());
+                // If it succeeds and returns a value without variable lookups...
+                if (res.type !== 'error' && res.result !== undefined) {
+                    // It parsed as a number!
+                    return {
+                        type: "error",
+                        message: `Ambiguous parameter '${clean}'. It is a valid number in the current base (${this.inputBase}).`
+                    };
+                }
+            } catch (e) {
+                // Not a number, good.
+            }
         }
 
         // STATIC SCOPING & BASE SAFETY
         // 1. Numbers: Convert to 0d decimal literal to make them base-independent
         // 2. Variables: If not in params and not underscore prefixed, capture current value (freeze)
-        // We use a regex similar to variable substitution but for Body Preprocessing
+        // 3. Defaults: Freeze default values too
 
-        // Regex to identify tokens: Numbers, Vars, Functions (Namespaced)
-        // We need to match numbers carefully (ints, decimals, rationals)
-        // And variables/identifiers.
+        const staticBody = this.freezeExpression(body, paramSet);
 
-        let staticBody = body;
+        // Freeze Defaults
+        const staticDefaults = {};
+        for (const [key, val] of Object.entries(defaults)) {
+            staticDefaults[key] = this.freezeExpression(val, paramSet);
+        }
 
-        // A. Tokenize - We iterate through matches to replace safely
-        // Combined regex is tricky. Let's do Numbers first? No, overlap risk (e.g. 0d10).
-        // Let's use a callback replacer on a comprehensive regex.
-
-        // Regex: 
-        // 1. Identifiers: (?:@@[\w]+@)?@?[_a-zA-Z][\w]*
-        // 2. Numbers: (?:0[dxob])?[\dA-F]+(?:\.[\dA-F]*)? ... this is hard to match perfectly against parser.
-        // Simplification: We assume tokens are separated. 
-        // BUT 'x*10' has no separation.
-
-        // Strategy: Iterate finding Identifiers or Numbers.
-        // Identifiers: (?:\b|[^0-9A-Z])(@?[_a-zA-Z][a-zA-Z0-9_]*)
-        // Number-like: \b(?:0[dxob])?[\d.A-F]+\b (Roughly)
-
-        // Better Strategy: Use the same regex as evaluateExpression for substitution?
-        // But we also need to catch numbers.
-
-        // Let's try to capture Variables for freezing first.
-        // Variables must be whole words (or @vars).
-        // Replace non-param, non-underscore vars with their formatValueWithPrefix(val).
-
-        const varRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))/g;
-        staticBody = staticBody.replace(varRegex, (fullMatch, identifier, offset, string) => {
-            // identifier is the captured group e.g. "x", "@val", "@@Mod@Val"
-            // fullMatch includes the prefix char (e.g. " x" or "(x")
-
-            // Reconstruct prefix
-            const prefix = fullMatch.substring(0, fullMatch.indexOf(identifier));
-
-            // Check if it is a parameter
-            const norm = identifier.replace(/^@/, '');
-
-            // 1. Is it a Parameter?
-            if (paramSet.has(norm)) return fullMatch; // Keep as is
-
-            // 2. Is it Underscore Variable? (Dynamic)
-            if (norm.startsWith('_')) return fullMatch; // Keep dynamic
-
-            // 3. Is it a known Function?
-            if (this.functions.has(norm)) {
-
-                // If the function name starts with underscore, it is dynamic.
-                if (norm.startsWith('_')) {
-                    return fullMatch;
-                }
-
-                // Get the function definition
-                const originalFunc = this.functions.get(norm);
-
-                // If it is a JS function, we don't need to snapshot it (variables in JS are closed over by JS engine or context, which is outside our control/scope).
-                if (originalFunc.type === 'js') {
-                    return fullMatch;
-                }
-
-                // It is a User Defined Function. 
-                // Create a SNAPSHOT using Namespace syntax to be valid identifier
-                const timestamp = Date.now().toString(36);
-                const random = Math.random().toString(36).substring(2, 6);
-                const snapshotName = `@@Static@${norm}_${timestamp}${random}`;
-
-                // Clone the function definition
-                const snapshotFunc = { ...originalFunc, type: 'def', doc: `[Snapshot] ${originalFunc.doc}` };
-
-                // Save snapshot
-                // Save snapshot
-                this.functions.set(snapshotName, snapshotFunc);
-
-                // Return replacement
-
-                // Return replacement
-                return prefix + snapshotName;
-            }
-
-            // 4. Is it a local variable in scope?
-            if (this.variables.has(norm)) {
-                // FREEZE IT
-                const val = this.variables.get(norm);
-                // Return prefix + frozen value
-                // Verify: if val is complex, parenthesis might be safe, but usually valid.
-                return prefix + this.formatValueWithPrefix(val);
-            }
-
-            // 5. Unknown? Leave it (maybe future param or error at runtime)
-            return fullMatch;
-        });
-
-        // B. Freeze Numbers to Base 10 (0d...)
-        // This is necessary so "x*10" in Hex context doesn't become x*16 later.
-        // We match digit sequences that are NOT parts of identifiers.
-        // Regex must be careful not to match 'a' in 'var_a'.
-        // We assume identifiers are already handled or we look for boundary.
-        // Simple heuristic: A sequence of digits/dots that is strictly numeric for current base?
-        // Problem: 'A' in Hex is a number. 'A' in Dec is a variable/func.
-        // If we in Dec, '10' is 10. In Hex, '10' is 16.
-        // We want to bake '10' as '0d10' (10) or '0d16' (16) depending on current mode?
-        // User said: "G(x)-> x*10 would write the 10 in the current base."
-        // So if I am in DEC, '10' -> 0d10.
-        // If I am in HEX, '10' -> 0d16.
-
-        // We can use parser on potential number tokens.
-        // But extracting number tokens is hard without full parser logic.
-        // A specific approach: Match standalone number-like strings.
-        // (?<![\w@])[\d.A-Za-z]+ ? Too broad.
-
-        // Let's use `preprocessExpression`-like logic: identify what LOOKS like a number in CURRENT base and freeze it.
-        // If it parses as a Rational, replace with 0d representation.
-        // CAUTION: Don't replace function names or vars.
-        // Only if it is NOT a known var/func/param?
-
-        // We'll iterate tokens. Anything that isn't a var/func/param and parses as number -> freeze.
-        // This is complex regex. 
-        // Simplified approach: Match things starting with digit or dot.
-        const numRegex = /(?:^|[^a-zA-Z0-9_@])(\d+[a-zA-Z0-9.]*|0[dxob][a-zA-Z0-9.]+)/g;
-        // This regex catches "10", "0xFF", "3.14".
-        // It might catch "2x" as "2".
-
-
-
-        staticBody = staticBody.replace(numRegex, (fullMatch, numStr, offset, string) => {
-
-            const prefix = fullMatch.substring(0, fullMatch.indexOf(numStr));
-            // Try to parse numStr
-            try {
-                // We must determine if this is a valid number in CURRENT base context.
-                const evalRes = this.evaluateExpression(numStr, new Map()); // empty scope
-
-
-                if (evalRes.type !== 'error' && evalRes.result !== undefined) {
-                    // It's a number!
-                    const val = evalRes.result;
-                    // Format as 0d string
-                    const safeStr = this.formatValueWithPrefix(val);
-                    // If original ended with alphanumeric and Replacement ends with digit, we might merge tokens?
-                    // 0d... ends with digit.
-                    // Original "2x". Replaced "0d2x".
-                    // If next char is alphanumeric, we should add space?
-                    // Look ahead in original string?
-                    const nextCharIdx = offset + fullMatch.length;
-                    const nextChar = body[nextCharIdx]; // approximate
-                    // Actually string is `string` arg.
-                    const charAfter = string[offset + fullMatch.length];
-
-                    let insertion = safeStr;
-                    if (/[a-zA-Z0-9]/.test(charAfter)) {
-                        insertion += " "; // Safety space
-                    }
-                    return prefix + insertion;
-                }
-            } catch (e) {
-
-                // Not a number, ignore
-            }
-            return fullMatch;
-        });
-
-        this.functions.set(funcName, { params, body: staticBody, type: 'def', doc: doc || `User defined function: ${body}`, defaults });
+        this.functions.set(funcName, { params, body: staticBody, type: 'def', doc: doc || `User defined function: ${body}`, defaults: staticDefaults });
         return {
             type: "function",
             result: null,
@@ -1388,9 +1261,9 @@ export class VariableManager {
             } catch (parseError) {
                 const trimmed = preprocessed.trim();
                 // Check if any token looks like a function name
-                const tokens = trimmed.split(/[^a-zA-Z0-9@]/).filter(t => t.length > 0);
+                const tokens = trimmed.split(/[^a-zA-Z0-9@_]/).filter(t => t.length > 0);
                 for (const token of tokens) {
-                    const rawName = token.startsWith("@") ? token.substring(1) : token;
+                    const rawName = token.startsWith("@@") ? token : (token.startsWith("@") ? token.substring(1) : token);
                     if (this.functions.has(rawName)) {
                         // If it's just the function name (standalone), it might be valid for HOC (return below)
                         // If it's part of a larger failing expression, it's an error.
@@ -1531,5 +1404,86 @@ export class VariableManager {
      */
     setCustomBases(customBases) {
         this.customBases = customBases;
+    }
+
+    /**
+ * Freeze an expression by resolving static variables, snapshotting functions, and fixing numbers to base.
+ * @param {string} expression - The expression string
+ * @param {Set<string>} paramSet - Set of parameter names to preserve/prefix
+ * @returns {string} - The frozen expression
+ */
+    freezeExpression(expression, paramSet) {
+        let staticExpr = expression;
+
+        // 1. Variable Substitution
+        const varRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))/g;
+        staticExpr = staticExpr.replace(varRegex, (fullMatch, identifier, offset, string) => {
+            const prefix = fullMatch.substring(0, fullMatch.indexOf(identifier));
+            const norm = identifier.replace(/^@/, '');
+
+            // 1. Is it a Parameter?
+            if (paramSet.has(norm)) {
+                return prefix + '@' + norm;
+            }
+
+            // 2. Is it Underscore Variable? (Dynamic)
+            if (norm.startsWith('_')) return fullMatch;
+
+            // 3. Is it a known Function?
+            if (this.functions.has(norm)) {
+                if (norm.startsWith('_')) return fullMatch;
+
+                const originalFunc = this.functions.get(norm);
+                if (originalFunc.type === 'js') return fullMatch;
+
+                // Create Snapshot
+                const timestamp = Date.now().toString(36);
+                const random = Math.random().toString(36).substring(2, 6);
+                const snapshotName = `@@Static@${norm}_${timestamp}${random}`;
+
+                const snapshotFunc = { ...originalFunc, type: 'def', doc: `[Snapshot] ${originalFunc.doc}` };
+                this.functions.set(snapshotName, snapshotFunc);
+
+                return prefix + snapshotName;
+            }
+
+            // 4. Is it a local variable in scope?
+            if (this.variables.has(norm)) {
+                const val = this.variables.get(norm);
+                return prefix + this.formatValueWithPrefix(val);
+            }
+
+            // 5. Unknown
+            // STRICT CHECK: Static variables must exist at definition.
+            // If it's NOT dynamic (starts with _), then it is an error to reference unknown variable.
+            if (!norm.startsWith('_')) {
+                throw new Error(`Undefined variable or function '${norm}' at definition time. Use '_${norm}' for dynamic resolution or define it first.`);
+            }
+
+            return fullMatch;
+        });
+
+        // 2. Freeze Numbers
+        const numRegex = /(?:^|[^a-zA-Z0-9_@])(\d+[a-zA-Z0-9.]*|0[dxob][a-zA-Z0-9.]+)/g;
+        staticExpr = staticExpr.replace(numRegex, (fullMatch, numStr, offset, string) => {
+            const prefix = fullMatch.substring(0, fullMatch.indexOf(numStr));
+            try {
+                const evalRes = this.evaluateExpression(numStr, new Map());
+                if (evalRes.type !== 'error' && evalRes.result !== undefined) {
+                    const val = evalRes.result;
+                    const safeStr = this.formatValueWithPrefix(val);
+
+                    const charAfter = string[offset + fullMatch.length];
+                    let insertion = safeStr;
+                    if (/[a-zA-Z0-9]/.test(charAfter)) {
+                        insertion += " ";
+                    }
+                    return prefix + insertion;
+                }
+            } catch (e) { }
+            return fullMatch;
+        });
+
+        return staticExpr;
     }
 }
