@@ -17,9 +17,9 @@ export class VariableManager {
         this.customBases = new Map(); // Store custom base definitions
 
         // Regex patterns for validation
-        // Updated to support namespacing: @@Module@Name
-        // Variable: starts with lowercase, optional @@Mod@ prefix
-        this.variablePattern = /^(?:@@[a-zA-Z0-9_]+@)?(?:@?([a-z][a-zA-Z0-9_]*))$/;
+        // Updaed to support namespacing: @@Module@Name
+        // Variable: starts with lowercase or underscore, optional @@Mod@ prefix
+        this.variablePattern = /^(?:@@[a-zA-Z0-9_]+@)?(?:@?([_a-z][a-zA-Z0-9_]*))$/;
         // Function: starts with uppercase, optional @@Mod@ prefix
         this.functionPattern = /^(?:@@[a-zA-Z0-9_]+@)?(?:@?([A-Z][a-zA-Z0-9_]*))$/;
     }
@@ -35,7 +35,7 @@ export class VariableManager {
             if (this.functionPattern.test(name)) {
                 throw new Error(`Invalid variable name '${name}'. Function names (starting with Uppercase) cannot be assigned values directly. Use '${name}(...) -> ...' to define a function.`);
             }
-            throw new Error(`Invalid variable name '${name}'. Variables must start with a lowercase letter or @lowercase.`);
+            throw new Error(`Invalid variable name '${name}'. Variables must start with a lowercase letter, underscore, or @lowercase/@underscore.`);
         }
         // Normalize: strip leading @
         const normalizedName = name.startsWith("@") ? name.substring(1) : name;
@@ -47,8 +47,10 @@ export class VariableManager {
      * @param {string} name - Function name (must start with Uppercase or @Uppercase)
      * @param {string[]} params - List of parameter names
      * @param {string} body - Function body expression
+     * @param {string} doc - Documentation string
+     * @param {object} defaults - Map of parameter name to default value expression
      */
-    defineFunction(name, params, body, doc = "") {
+    defineFunction(name, params, body, doc = "", defaults = {}) {
         if (!this.functionPattern.test(name)) {
             // Check if it looks like a variable name
             if (this.variablePattern.test(name)) {
@@ -56,7 +58,7 @@ export class VariableManager {
             }
             throw new Error(`Invalid function name '${name}'. Functions must start with an Uppercase letter or @Uppercase.`);
         }
-        this.functions.set(name, { params, body, doc, type: 'def' });
+        this.functions.set(name, { params, body, doc, type: 'def', defaults });
     }
 
     /**
@@ -347,28 +349,58 @@ export class VariableManager {
             // 1. Function Definition: Name(args) -> body
             // Matches: FuncName(args) -> body
             // FuncName must be generic word or @word to match properly (validation inside handler)
-            const funcDefMatch = trimmed.match(/^(@?[a-zA-Z][a-zA-Z0-9]*)\s*\(([^)]*)\)\s*->\s*(.+)$/);
+            const funcDefMatch = trimmed.match(/^(@?[_a-zA-Z][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*->\s*(.+)$/);
             if (funcDefMatch) {
                 const [, funcName, paramStr, body] = funcDefMatch;
-                const params = paramStr.split(",").map(p => p.trim()).filter(p => p);
-                return this.handleFunctionDefinition(funcName, params, body);
+                const rawParams = paramStr.split(",").map(p => p.trim()).filter(p => p);
+
+                const params = [];
+                const defaults = {};
+
+                for (const p of rawParams) {
+                    if (p.includes('?')) {
+                        const [pName, pDef] = p.split('?').map(s => s.trim());
+                        if (!pName) throw new Error("Invalid parameter syntax: " + p);
+                        params.push(pName + '?'); // Mark as optional for signature consistency
+                        if (pDef) defaults[pName] = pDef;
+                    } else {
+                        params.push(p);
+                    }
+                }
+
+                return this.handleFunctionDefinition(funcName, params, body, undefined, defaults);
             }
 
             // 2. Assignment Style Definition: Name = (args) -> body  OR  Name = arg -> body
             // Matches: Name = ... -> ...
-            const arrowAssignMatch = trimmed.match(/^(@?[a-zA-Z][a-zA-Z0-9]*)\s*=\s*(?:(?:\(([^)]*)\))|([a-zA-Z][a-zA-Z0-9]*))\s*->\s*(.+)$/);
+            const arrowAssignMatch = trimmed.match(/^(@?[_a-zA-Z][a-zA-Z0-9_]*)\s*=\s*(?:(?:\(([^)]*)\))|([_a-zA-Z][a-zA-Z0-9_]*))\s*->\s*(.+)$/);
             if (arrowAssignMatch) {
                 const [, name, paramsInParens, singleParam, body] = arrowAssignMatch;
-                const params = (paramsInParens !== undefined ? paramsInParens : singleParam)
+                const rawParams = (paramsInParens !== undefined ? paramsInParens : singleParam)
                     .split(",").map(p => p.trim()).filter(p => p);
+
+                const params = [];
+                const defaults = {};
+
+                for (const p of rawParams) {
+                    if (p.includes('?')) {
+                        const [pName, pDef] = p.split('?').map(s => s.trim());
+                        if (!pName) throw new Error("Invalid parameter syntax: " + p);
+                        params.push(pName + '?');
+                        if (pDef) defaults[pName] = pDef;
+                    } else {
+                        params.push(p);
+                    }
+                }
+
                 // This is a function definition disguised as assignment
-                return this.handleFunctionDefinition(name, params, body);
+                return this.handleFunctionDefinition(name, params, body, undefined, defaults);
             }
 
             // 3. Variable Assignment: Name = Expression
             // Matches: Name = ... (but NOT -> as that's handled above)
             // We match generic identifier, validation of case happens in handleAssignment
-            const assignmentMatch = trimmed.match(/^(@?[a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.+)$/);
+            const assignmentMatch = trimmed.match(/^(@?[_a-zA-Z][a-zA-Z0-9_]*)\s*=\s*(.+)$/);
             if (assignmentMatch) {
                 const [, varName, expression] = assignmentMatch;
                 return this.handleAssignment(varName, expression);
@@ -515,9 +547,8 @@ export class VariableManager {
     /**
      * Handle function definition
      */
-    handleFunctionDefinition(funcName, params, body) {
+    handleFunctionDefinition(funcName, params, body, doc, defaults = {}) {
         // Validate parameters
-        // Modified: Allow multi-character params, rely on case for type checking in calls.
         if (params.length === 0) {
             // 0 params ok
         }
@@ -526,17 +557,187 @@ export class VariableManager {
             return { type: "error", message: "Duplicate parameter names" };
         }
 
+        const paramSet = new Set();
         // Check format
         for (const param of params) {
-            if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(param)) {
+            // Allow param? 
+            const clean = param.replace(/\?$/, '');
+            if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(clean)) {
                 return {
                     type: "error",
                     message: `Invalid parameter name '${param}'. Must start with letter.`
                 };
             }
+            paramSet.add(clean);
         }
 
-        this.functions.set(funcName, { params, body, type: 'def', doc: `User defined function: ${body}` });
+        // STATIC SCOPING & BASE SAFETY
+        // 1. Numbers: Convert to 0d decimal literal to make them base-independent
+        // 2. Variables: If not in params and not underscore prefixed, capture current value (freeze)
+        // We use a regex similar to variable substitution but for Body Preprocessing
+
+        // Regex to identify tokens: Numbers, Vars, Functions (Namespaced)
+        // We need to match numbers carefully (ints, decimals, rationals)
+        // And variables/identifiers.
+
+        let staticBody = body;
+
+        // A. Tokenize - We iterate through matches to replace safely
+        // Combined regex is tricky. Let's do Numbers first? No, overlap risk (e.g. 0d10).
+        // Let's use a callback replacer on a comprehensive regex.
+
+        // Regex: 
+        // 1. Identifiers: (?:@@[\w]+@)?@?[_a-zA-Z][\w]*
+        // 2. Numbers: (?:0[dxob])?[\dA-F]+(?:\.[\dA-F]*)? ... this is hard to match perfectly against parser.
+        // Simplification: We assume tokens are separated. 
+        // BUT 'x*10' has no separation.
+
+        // Strategy: Iterate finding Identifiers or Numbers.
+        // Identifiers: (?:\b|[^0-9A-Z])(@?[_a-zA-Z][a-zA-Z0-9_]*)
+        // Number-like: \b(?:0[dxob])?[\d.A-F]+\b (Roughly)
+
+        // Better Strategy: Use the same regex as evaluateExpression for substitution?
+        // But we also need to catch numbers.
+
+        // Let's try to capture Variables for freezing first.
+        // Variables must be whole words (or @vars).
+        // Replace non-param, non-underscore vars with their formatValueWithPrefix(val).
+
+        const varRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))/g;
+        staticBody = staticBody.replace(varRegex, (fullMatch, identifier, offset, string) => {
+            // identifier is the captured group e.g. "x", "@val", "@@Mod@Val"
+            // fullMatch includes the prefix char (e.g. " x" or "(x")
+
+            // Reconstruct prefix
+            const prefix = fullMatch.substring(0, fullMatch.indexOf(identifier));
+
+            // Check if it is a parameter
+            const norm = identifier.replace(/^@/, '');
+
+            // 1. Is it a Parameter?
+            if (paramSet.has(norm)) return fullMatch; // Keep as is
+
+            // 2. Is it Underscore Variable? (Dynamic)
+            if (norm.startsWith('_')) return fullMatch; // Keep dynamic
+
+            // 3. Is it a known Function?
+            if (this.functions.has(norm)) {
+
+                // If the function name starts with underscore, it is dynamic.
+                if (norm.startsWith('_')) {
+                    return fullMatch;
+                }
+
+                // Get the function definition
+                const originalFunc = this.functions.get(norm);
+
+                // If it is a JS function, we don't need to snapshot it (variables in JS are closed over by JS engine or context, which is outside our control/scope).
+                if (originalFunc.type === 'js') {
+                    return fullMatch;
+                }
+
+                // It is a User Defined Function. 
+                // Create a SNAPSHOT using Namespace syntax to be valid identifier
+                const timestamp = Date.now().toString(36);
+                const random = Math.random().toString(36).substring(2, 6);
+                const snapshotName = `@@Static@${norm}_${timestamp}${random}`;
+
+                // Clone the function definition
+                const snapshotFunc = { ...originalFunc, type: 'def', doc: `[Snapshot] ${originalFunc.doc}` };
+
+                // Save snapshot
+                // Save snapshot
+                this.functions.set(snapshotName, snapshotFunc);
+
+                // Return replacement
+
+                // Return replacement
+                return prefix + snapshotName;
+            }
+
+            // 4. Is it a local variable in scope?
+            if (this.variables.has(norm)) {
+                // FREEZE IT
+                const val = this.variables.get(norm);
+                // Return prefix + frozen value
+                // Verify: if val is complex, parenthesis might be safe, but usually valid.
+                return prefix + this.formatValueWithPrefix(val);
+            }
+
+            // 5. Unknown? Leave it (maybe future param or error at runtime)
+            return fullMatch;
+        });
+
+        // B. Freeze Numbers to Base 10 (0d...)
+        // This is necessary so "x*10" in Hex context doesn't become x*16 later.
+        // We match digit sequences that are NOT parts of identifiers.
+        // Regex must be careful not to match 'a' in 'var_a'.
+        // We assume identifiers are already handled or we look for boundary.
+        // Simple heuristic: A sequence of digits/dots that is strictly numeric for current base?
+        // Problem: 'A' in Hex is a number. 'A' in Dec is a variable/func.
+        // If we in Dec, '10' is 10. In Hex, '10' is 16.
+        // We want to bake '10' as '0d10' (10) or '0d16' (16) depending on current mode?
+        // User said: "G(x)-> x*10 would write the 10 in the current base."
+        // So if I am in DEC, '10' -> 0d10.
+        // If I am in HEX, '10' -> 0d16.
+
+        // We can use parser on potential number tokens.
+        // But extracting number tokens is hard without full parser logic.
+        // A specific approach: Match standalone number-like strings.
+        // (?<![\w@])[\d.A-Za-z]+ ? Too broad.
+
+        // Let's use `preprocessExpression`-like logic: identify what LOOKS like a number in CURRENT base and freeze it.
+        // If it parses as a Rational, replace with 0d representation.
+        // CAUTION: Don't replace function names or vars.
+        // Only if it is NOT a known var/func/param?
+
+        // We'll iterate tokens. Anything that isn't a var/func/param and parses as number -> freeze.
+        // This is complex regex. 
+        // Simplified approach: Match things starting with digit or dot.
+        const numRegex = /(?:^|[^a-zA-Z0-9_@])(\d+[a-zA-Z0-9.]*|0[dxob][a-zA-Z0-9.]+)/g;
+        // This regex catches "10", "0xFF", "3.14".
+        // It might catch "2x" as "2".
+
+
+
+        staticBody = staticBody.replace(numRegex, (fullMatch, numStr, offset, string) => {
+
+            const prefix = fullMatch.substring(0, fullMatch.indexOf(numStr));
+            // Try to parse numStr
+            try {
+                // We must determine if this is a valid number in CURRENT base context.
+                const evalRes = this.evaluateExpression(numStr, new Map()); // empty scope
+
+
+                if (evalRes.type !== 'error' && evalRes.result !== undefined) {
+                    // It's a number!
+                    const val = evalRes.result;
+                    // Format as 0d string
+                    const safeStr = this.formatValueWithPrefix(val);
+                    // If original ended with alphanumeric and Replacement ends with digit, we might merge tokens?
+                    // 0d... ends with digit.
+                    // Original "2x". Replaced "0d2x".
+                    // If next char is alphanumeric, we should add space?
+                    // Look ahead in original string?
+                    const nextCharIdx = offset + fullMatch.length;
+                    const nextChar = body[nextCharIdx]; // approximate
+                    // Actually string is `string` arg.
+                    const charAfter = string[offset + fullMatch.length];
+
+                    let insertion = safeStr;
+                    if (/[a-zA-Z0-9]/.test(charAfter)) {
+                        insertion += " "; // Safety space
+                    }
+                    return prefix + insertion;
+                }
+            } catch (e) {
+
+                // Not a number, ignore
+            }
+            return fullMatch;
+        });
+
+        this.functions.set(funcName, { params, body: staticBody, type: 'def', doc: doc || `User defined function: ${body}`, defaults });
         return {
             type: "function",
             result: null,
@@ -576,19 +777,30 @@ export class VariableManager {
             else if (char === ')' || char === ']' || char === '}') depth--;
 
             if (char === ',' && depth === 0) {
-                args.push(currentArg.trim());
+                // Push trimmed arg, OR undefined if empty (skipping)
+                const trimmed = currentArg.trim();
+                args.push(trimmed === "" ? undefined : trimmed);
                 currentArg = "";
             } else {
                 currentArg += char;
             }
         }
-        if (currentArg.trim() !== "") args.push(currentArg.trim());
+        // Push last arg if not empty string
+        const lastTrimmed = currentArg.trim();
+        if (lastTrimmed !== "") {
+            args.push(lastTrimmed);
+        }
 
+        // Calculate min required args based on optional params (ending with ?)
+        const minArgs = func.params.filter(p => !p.endsWith('?')).length;
+        const maxArgs = func.params.length;
 
-        if (args.length !== func.params.length) {
+        // Check argument count (allow less than min if defaults exist? No, defaults are for optionals usually)
+        // If an argument is undefined (skipped), we check if there is a default later.
+        if (args.length > maxArgs) {
             return {
                 type: "error",
-                message: `Function ${funcName} expects ${func.params.length} arguments, got ${args.length}`,
+                message: `Function ${funcName} expects at most ${maxArgs} arguments, got ${args.length}`,
             };
         }
 
@@ -596,13 +808,37 @@ export class VariableManager {
             // Evaluate arguments with Strict Typing and Lambda support
             const argValues = [];
 
-            for (let i = 0; i < args.length; i++) {
-                const argRaw = args[i];
+            // Loop up to maxArgs (params length) to handle defaults
+            for (let i = 0; i < maxArgs; i++) {
+                let argRaw = args[i]; // May be undefined (skipped or missing at end)
                 const paramName = func.params[i];
+                const cleanParamName = paramName.replace(/\?$/, '');
+
+                // Resolve Default if missing
+                if (argRaw === undefined) {
+                    if (func.defaults && func.defaults[cleanParamName] !== undefined) {
+                        argRaw = func.defaults[cleanParamName];
+                    } else if (paramName.endsWith('?')) {
+                        // Optional with no default -> pass undefined
+                        argRaw = undefined;
+                    } else {
+                        // Required param missing
+                        throw new Error(`Missing required argument '${cleanParamName}'`);
+                    }
+                }
+
+                // If effective arg is still undefined (optional without default)
+                if (argRaw === undefined) {
+                    argValues.push(undefined);
+                    continue;
+                }
+
 
                 // STRICTNESS CHECK: Parameter Case
-                const isParamFunction = /^[A-Z]/.test(paramName); // Uppercase = expects Function
-                const isParamValue = /^[a-z]/.test(paramName);     // Lowercase = expects Value
+                // Handle optional marker (?)
+                // cleanParamName already defined above
+                const isParamFunction = /^[A-Z]/.test(cleanParamName); // Uppercase = expects Function
+                const isParamValue = /^[a-z]/.test(cleanParamName);     // Lowercase = expects Value
 
                 // CHECK FOR EXPLICIT LAMBDA: "var -> expr"
                 const lambdaMatch = argRaw.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
@@ -610,7 +846,7 @@ export class VariableManager {
                 if (lambdaMatch) {
                     if (!isParamFunction) {
                         // Case: Parameter is lowercase (value), but passed lambda.
-                        throw new Error(`Argument mismatch for '${paramName}': Expected value (compatible with lowercase), got Lambda function.`);
+                        throw new Error(`Argument mismatch for '${cleanParamName}': Expected value (compatible with lowercase), got Lambda function.`);
                     }
 
                     // Create Anonymous Function
@@ -643,16 +879,20 @@ export class VariableManager {
                             continue;
                         } else {
                             // Not found function
-                            throw new Error(`Argument mismatch for '${paramName}': Expected existing function, got unknown '${trimmed}'`);
+                            throw new Error(`Argument mismatch for '${cleanParamName}': Expected existing function, got unknown '${trimmed}'`);
                         }
                     } else {
-                        throw new Error(`Argument mismatch for '${paramName}': Expected function name or lambda, got expression.`);
+                        throw new Error(`Argument mismatch for '${cleanParamName}': Expected function name or lambda, got expression.`);
                     }
                 }
 
                 // Expecting Value
+                // console.log(`Evaluating arg ${cleanParamName}: '${argRaw}'`);
                 const result = this.evaluateExpression(argRaw);
-                if (result.type === "error") return result;
+                if (result.type === "error") {
+                    // console.log("Arg eval error:", result.message);
+                    return result;
+                }
 
                 // Sanity check: Ensure not a function name string being passed for a value assumption?
                 // The prompt says "Variables or expressions that resolve to stuff that is compatible with lower case letter variables".
@@ -661,9 +901,10 @@ export class VariableManager {
             }
 
             if (func.type === 'js') {
-                // Execute JS Handler
+                // Execute JS Handler with context
                 try {
-                    const res = func.handler(...argValues);
+                    // Pass 'this' as context to allow access to variables (e.g. environment settings)
+                    const res = func.handler.call(this, ...argValues);
                     return { type: 'expression', result: res };
                 } catch (e) {
                     return { type: 'error', message: `JS Function ${funcName} error: ${e.message}` };
@@ -684,7 +925,8 @@ export class VariableManager {
 
             for (let i = 0; i < func.params.length; i++) {
                 const param = func.params[i];
-                callBindScope.set(param, argValues[i]);
+                const cleanParam = param.replace(/\?$/, '');
+                callBindScope.set(cleanParam, argValues[i]);
             }
 
             // Local Scope handling in evaluateExpression is sufficient for HOC if we pass map
@@ -880,7 +1122,8 @@ export class VariableManager {
             // Function Call Substitution
             // Function Call Substitution - Allow [a-zA-Z] to support HOC aliases
             // Updated Regex for Namespaces: (@@Mod@Name)
-            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[a-zA-Z][a-zA-Z0-9_]*))\s*\(/g;
+            // Updated to support underscore prefixed functions (_F)
+            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))\s*\(/g;
             let match;
             while ((match = functionCallRegex.exec(substitutedFunctions)) !== null) {
                 const fullMatch = match[0];
@@ -937,14 +1180,47 @@ export class VariableManager {
                         }
                         if (currentArg.trim() !== "") args.push(currentArg.trim());
 
-                        if (args.length !== funcDef.params.length) {
-                            throw new Error(`Function '${funcName}' expects ${funcDef.params.length} arguments, got ${args.length}`);
+                        // Count required arguments
+                        let minArgs = 0;
+                        const maxArgs = funcDef.params.length;
+                        for (const p of funcDef.params) {
+                            if (!p.endsWith("?") && (!funcDef.defaults || funcDef.defaults[p] === undefined)) {
+                                minArgs++;
+                            }
+                        }
+
+                        if (args.length < minArgs || args.length > maxArgs) {
+                            throw new Error(`Function '${funcName}' expects ${minArgs}-${maxArgs} arguments, got ${args.length}`);
                         }
 
                         const callBindScope = new Map();
                         for (let i = 0; i < funcDef.params.length; i++) {
-                            const paramName = funcDef.params[i];
-                            const argRaw = args[i];
+                            const rawParamName = funcDef.params[i];
+                            const isOptional = rawParamName.endsWith("?");
+                            const paramName = isOptional ? rawParamName.slice(0, -1) : rawParamName;
+
+                            let argRaw = args[i];
+
+                            // Handle Skipped/Missing Arguments
+                            if (argRaw === undefined || argRaw === "") {
+                                if (funcDef.defaults && funcDef.defaults[paramName] !== undefined) {
+                                    argRaw = funcDef.defaults[paramName];
+                                } else if (isOptional) {
+                                    // Optional but no default? Treat as undefined (VariableManager usually requires value, but maybe acceptable?)
+                                    // Given implementation of handleFunctionCall, we stick to defaults or error if missing required.
+                                    // But we already checked minArgs. So this must be optional.
+                                    // If no default, what value? 'undefined' string? invalid?
+                                    // Let's assume defaults map is populated via processInput.
+                                    // If no default, maybe we shouldn't set it or set to something specific.
+                                    // However, expressions like x*a need 'a' to be a value.
+                                    // If 'a' is optional with no default, x*a fails unless checked.
+                                    // For now, let's assume valid default if used.
+                                    continue; // Skip binding if no value and no default? Or bind undefined?
+                                } else {
+                                    // Should be caught by minArgs check, but safety fallback
+                                    throw new Error(`Missing required argument '${paramName}'`);
+                                }
+                            }
 
                             // STRICTNESS CHECK: Parameter Case
                             const isParamFunction = /^[A-Z]/.test(paramName); // Uppercase = expects Function
@@ -1020,7 +1296,7 @@ export class VariableManager {
             // We'll iterate through matches and make substitution decisions based on strictness rules.
             // Updated Regex for Namespaces: (@@Mod@Name)
 
-            substituted = substituted.replace(/(^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?)(@?)([a-zA-Z][a-zA-Z0-9_]*)/g, (match, prefixChar, namespaceInfo, atSign, name) => {
+            substituted = substituted.replace(/(^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?)(@?)([_a-zA-Z][a-zA-Z0-9_]*)/g, (match, prefixChar, namespaceInfo, atSign, name) => {
                 const fullIdentifier = `${namespaceInfo}${name}`;
                 // Unified Identity: variables and functions
                 // Check Variables
@@ -1092,6 +1368,7 @@ export class VariableManager {
             });
 
             const preprocessed = this.preprocessExpression(substituted);
+            // console.log("Evaluating preprocessed:", preprocessed); // DEBUG
 
             const specialMatch = preprocessed.match(
                 /^(SUM|PROD|SEQ)\[([a-zA-Z])\]\(([^,]+),\s*([^,]+),\s*([^,]+)(?:,\s*([^)]+))?\)$/,
