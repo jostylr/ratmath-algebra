@@ -1415,11 +1415,27 @@ export class VariableManager {
     freezeExpression(expression, paramSet) {
         let staticExpr = expression;
 
+        // Lambda Detection: Check if expression starts with "params ->"
+        // Regex: ^\s*(?:\(?([a-zA-Z0-9_, ]+)\)?)\s*->
+        const lambdaMatch = expression.match(/^\s*(?:\(?([a-zA-Z0-9_, ]+)\)?)\s*->/);
+        const protectedParams = new Set();
+        if (lambdaMatch) {
+            // Extract lambda params
+            const rawParams = lambdaMatch[1];
+            rawParams.split(',').forEach(p => protectedParams.add(p.trim()));
+        }
+
         // 1. Variable Substitution
+
         const varRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))/g;
         staticExpr = staticExpr.replace(varRegex, (fullMatch, identifier, offset, string) => {
             const prefix = fullMatch.substring(0, fullMatch.indexOf(identifier));
             const norm = identifier.replace(/^@/, '');
+
+            // 0. Is it a protected Lambda Parameter?
+            if (protectedParams.has(norm)) {
+                return fullMatch;
+            }
 
             // 1. Is it a Parameter?
             if (paramSet.has(norm)) {
