@@ -8,7 +8,7 @@
 import { Rational, RationalInterval, Integer, BaseSystem } from "@ratmath/core";
 import { Parser } from "@ratmath/parser";
 import { PackageRegistry, getPackageInfo, resolveDependencies, getPackagesHelpText } from "./package-registry.js";
-import { getHelpText, hasHelpTopic, getHelpTopicsText } from "./help-registry.js";
+import { getHelpText, hasHelpTopic, getHelpTopicsText, getHelpIntroText } from "./help-registry.js";
 
 export class VariableManager {
     constructor() {
@@ -18,6 +18,7 @@ export class VariableManager {
         this.loadedPackages = new Set(); // Track loaded packages from registry
         this.inputBase = null; // Base system for interpreting numbers without explicit base notation
         this.customBases = new Map(); // Store custom base definitions
+        this.decorations = new Map(); // Store property decorations for variables/functions: Map<name, Map<propName, value>>
 
         // Regex patterns for validation
         // Updaed to support namespacing: @@Module@Name
@@ -25,6 +26,57 @@ export class VariableManager {
         this.variablePattern = /^(?:@@[a-zA-Z0-9_]+@)?(?:@?([_a-z][a-zA-Z0-9_]*))$/;
         // Function: starts with uppercase, optional @@Mod@ prefix
         this.functionPattern = /^(?:@@[a-zA-Z0-9_]+@)?(?:@?([A-Z][a-zA-Z0-9_]*))$/;
+    }
+
+    /**
+     * Normalize a name for case-insensitive lookup after first character.
+     * - lowercase start (variable) → all lowercase (aVar → avar)
+     * - Uppercase start (function) → ALL UPPERCASE (Avar → AVAR)
+     * - underscore prefix → second char determines case (_Fun → _FUN, _var → _var)
+     * - @@Module@ prefix preserved, rest normalized
+     * @param {string} name - Name to normalize
+     * @returns {string} - Normalized name
+     */
+    normalizeName(name) {
+        if (!name) return name;
+        
+        // Internal @@Anon@ names should not be normalized - they're system-generated
+        if (name.startsWith("@@Anon@")) {
+            return name;
+        }
+        
+        // Handle @@ module prefix: @@Module@Name
+        const moduleMatch = name.match(/^(@@[a-zA-Z0-9_]+@)(.+)$/);
+        if (moduleMatch) {
+            const [, prefix, rest] = moduleMatch;
+            return prefix.toUpperCase() + this.normalizeName(rest);
+        }
+        
+        // Handle @ prefix (strip it for normalization, add back)
+        if (name.startsWith("@") && !name.startsWith("@@")) {
+            return "@" + this.normalizeName(name.substring(1));
+        }
+        
+        // Underscore prefix: second character determines case
+        // _Fun → _FUN (uppercase), _var → _var (lowercase)
+        if (name.startsWith("_") && name.length > 1) {
+            const secondChar = name.charAt(1);
+            if (secondChar >= 'A' && secondChar <= 'Z') {
+                return "_" + name.substring(1).toUpperCase();
+            } else {
+                return "_" + name.substring(1).toLowerCase();
+            }
+        }
+        
+        // First char determines case: lowercase → all lower, Uppercase → ALL UPPER
+        const firstChar = name.charAt(0);
+        if (firstChar >= 'a' && firstChar <= 'z') {
+            return name.toLowerCase();
+        } else if (firstChar >= 'A' && firstChar <= 'Z') {
+            return name.toUpperCase();
+        }
+        
+        return name;
     }
 
     /**
@@ -40,9 +92,32 @@ export class VariableManager {
             }
             throw new Error(`Invalid variable name '${name}'. Variables must start with a lowercase letter, underscore, or @lowercase/@underscore.`);
         }
-        // Normalize: strip leading @
-        const normalizedName = name.startsWith("@") ? name.substring(1) : name;
+        // Normalize: strip leading @ and apply case normalization
+        let normalizedName = name.startsWith("@") ? name.substring(1) : name;
+        normalizedName = this.normalizeName(normalizedName);
         this.variables.set(normalizedName, value);
+    }
+
+    /**
+     * Get a variable value with case normalization
+     * @param {string} name - Variable name
+     * @returns {any} - Variable value or undefined
+     */
+    getVariable(name) {
+        let normalizedName = name.startsWith("@") ? name.substring(1) : name;
+        normalizedName = this.normalizeName(normalizedName);
+        return this.variables.get(normalizedName);
+    }
+
+    /**
+     * Check if a variable exists with case normalization
+     * @param {string} name - Variable name
+     * @returns {boolean}
+     */
+    hasVariable(name) {
+        let normalizedName = name.startsWith("@") ? name.substring(1) : name;
+        normalizedName = this.normalizeName(normalizedName);
+        return this.variables.has(normalizedName);
     }
 
     /**
@@ -61,7 +136,38 @@ export class VariableManager {
             }
             throw new Error(`Invalid function name '${name}'. Functions must start with an Uppercase letter or @Uppercase.`);
         }
-        this.functions.set(name, { params, body, doc, type: 'def', defaults });
+        const normalizedName = this.normalizeName(name);
+        this.functions.set(normalizedName, { params, body, doc, type: 'def', defaults });
+    }
+
+    /**
+     * Get a function definition with case normalization
+     * @param {string} name - Function name
+     * @returns {object|undefined} - Function definition or undefined
+     */
+    getFunction(name) {
+        const normalizedName = this.normalizeName(name);
+        return this.functions.get(normalizedName);
+    }
+
+    /**
+     * Check if a function exists with case normalization
+     * @param {string} name - Function name
+     * @returns {boolean}
+     */
+    hasFunction(name) {
+        const normalizedName = this.normalizeName(name);
+        return this.functions.has(normalizedName);
+    }
+
+    /**
+     * Set a function definition with case normalization
+     * @param {string} name - Function name
+     * @param {object} def - Function definition
+     */
+    setFunction(name, def) {
+        const normalizedName = this.normalizeName(name);
+        this.functions.set(normalizedName, def);
     }
 
     /**
@@ -75,7 +181,8 @@ export class VariableManager {
         if (!this.functionPattern.test(name)) {
             throw new Error(`Invalid function name '${name}'. Functions must start with an Uppercase letter.`);
         }
-        this.functions.set(name, { type: 'js', handler, params, doc });
+        const normalizedName = this.normalizeName(name);
+        this.functions.set(normalizedName, { type: 'js', handler, params, doc });
     }
 
     /**
@@ -111,7 +218,7 @@ export class VariableManager {
             }
 
             // Check for function
-            const normalized = name.startsWith("@@") ? name : (name.startsWith("@") ? name.substring(1) : name);
+            const normalized = this.normalizeName(name.startsWith("@@") ? name : (name.startsWith("@") ? name.substring(1) : name));
             if (this.functions.has(normalized)) {
                 const f = this.functions.get(normalized);
                 const sig = `${normalized}(${f.params.join(", ")})`;
@@ -120,8 +227,8 @@ export class VariableManager {
             return `'${name}' not found. Type HELP topics or HELP packages.`;
         }
 
-        // No argument - show overview
-        return getHelpTopicsText();
+        // No argument - show essential intro
+        return getHelpIntroText();
     }
 
     /**
@@ -163,28 +270,31 @@ export class VariableManager {
      * @param {object} scope - Object containing vars and functions to load
      */
     loadModule(moduleName, scope) {
-        const prefix = `@@${moduleName}@`;
+        const normalizedModuleName = moduleName.toUpperCase();
+        const prefix = `@@${normalizedModuleName}@`;
 
-        // Register functions
+        // Register functions with normalized names
         if (scope.functions) {
             for (const [name, def] of Object.entries(scope.functions)) {
-                const qualifiedName = `${prefix}${name}`;
+                const normalizedName = this.normalizeName(name);
+                const qualifiedName = `${prefix}${normalizedName}`;
                 // Normalize: some modules use 'body' instead of 'handler' for JS functions
                 const normalizedDef = { ...def };
                 if (normalizedDef.body && !normalizedDef.handler) {
                     normalizedDef.handler = normalizedDef.body;
                 }
                 this.functions.set(qualifiedName, normalizedDef);
-                this.functions.set(name, { ...normalizedDef, isImported: true, module: moduleName });
+                this.functions.set(normalizedName, { ...normalizedDef, isImported: true, module: normalizedModuleName });
             }
         }
 
-        // Register variables
+        // Register variables with normalized names
         if (scope.variables) {
             for (const [name, val] of Object.entries(scope.variables)) {
-                const qualifiedName = `${prefix}${name}`;
+                const normalizedName = this.normalizeName(name);
+                const qualifiedName = `${prefix}${normalizedName}`;
                 this.variables.set(qualifiedName, val);
-                this.variables.set(name, val);
+                this.variables.set(normalizedName, val);
             }
         }
 
@@ -492,7 +602,15 @@ export class VariableManager {
                 return this.handleFunctionDefinition(name, params, body, undefined, defaults);
             }
 
-            // 3. Variable Assignment: Name = Expression
+            // 3. Property Assignment: Name.property = Expression
+            // Matches: P.type = "poly", P.Derivative = SomeFunc, etc.
+            const propAssignMatch = trimmed.match(/^(@?[_a-zA-Z][a-zA-Z0-9_]*)\.([_a-zA-Z][a-zA-Z0-9_]*)\s*=\s*(.+)$/);
+            if (propAssignMatch) {
+                const [, targetName, propName, expression] = propAssignMatch;
+                return this.handlePropertyAssignment(targetName, propName, expression);
+            }
+
+            // 4. Variable Assignment: Name = Expression
             // Matches: Name = ... (but NOT -> as that's handled above)
             // We match generic identifier, validation of case happens in handleAssignment
             const assignmentMatch = trimmed.match(/^(@?[_a-zA-Z][a-zA-Z0-9_]*)\s*=\s*(.+)$/);
@@ -516,7 +634,7 @@ export class VariableManager {
             if (funcLookupMatch) {
                 const name = funcLookupMatch[1];
                 // Normalize: strip @
-                const normalizedName = name.startsWith("@") ? name.substring(1) : name;
+                const normalizedName = this.normalizeName(name.startsWith("@") ? name.substring(1) : name);
 
                 if (this.functions.has(normalizedName)) {
                     // Ambiguity Check
@@ -578,8 +696,8 @@ export class VariableManager {
             const aliasMatch = expression.trim().match(/^(@?[A-Z][a-zA-Z0-9]*)$/);
             if (aliasMatch) {
                 const sourceName = aliasMatch[1];
-                const normSource = sourceName.startsWith("@") ? sourceName.substring(1) : sourceName;
-                const normTarget = varName.startsWith("@") ? varName.substring(1) : varName;
+                const normSource = this.normalizeName(sourceName.startsWith("@") ? sourceName.substring(1) : sourceName);
+                const normTarget = this.normalizeName(varName.startsWith("@") ? varName.substring(1) : varName);
 
                 if (this.functions.has(normSource)) {
                     const sourceDef = this.functions.get(normSource);
@@ -597,7 +715,7 @@ export class VariableManager {
             try {
                 const result = this.evaluateExpression(expression);
                 if (result.type !== "error" && result.result && result.result.type === "sequence") {
-                    const normTarget = varName.startsWith("@") ? varName.substring(1) : varName;
+                    const normTarget = this.normalizeName(varName.startsWith("@") ? varName.substring(1) : varName);
                     // Store as List Accessor Function
                     // L(i) -> element
                     // L(0) -> full list
@@ -643,14 +761,15 @@ export class VariableManager {
                 displayValue = result.result;
             }
 
-            this.variables.set(varName, valueToStore);
+            const normalizedVarName = this.normalizeName(varName);
+            this.variables.set(normalizedVarName, valueToStore);
 
             // For sequences, show assignment differently
             let message;
             if (result.result && result.result.type === "sequence") {
-                message = `${varName} = ${this.formatValue(valueToStore)} (assigned last value of ${this.formatValue(displayValue)})`;
+                message = `${normalizedVarName} = ${this.formatValue(valueToStore)} (assigned last value of ${this.formatValue(displayValue)})`;
             } else {
-                message = `${varName} = ${this.formatValue(displayValue)}`;
+                message = `${normalizedVarName} = ${this.formatValue(displayValue)}`;
             }
 
             return {
@@ -665,6 +784,52 @@ export class VariableManager {
             };
         }
     }
+
+    /**
+     * Handle property assignment (P.type = value)
+     */
+    handlePropertyAssignment(targetName, propName, expression) {
+        try {
+            // Normalize target name with case normalization
+            const normalizedTarget = this.normalizeName(targetName.startsWith("@") ? targetName.substring(1) : targetName);
+
+            // Check if target exists (variable or function)
+            const targetExists = this.variables.has(normalizedTarget) || this.functions.has(normalizedTarget);
+            if (!targetExists) {
+                return {
+                    type: "error",
+                    message: `Cannot set property on undefined target '${normalizedTarget}'. Define the variable or function first.`
+                };
+            }
+
+            // Evaluate the expression
+            const result = this.evaluateExpression(expression);
+            if (result.type === "error") {
+                return result;
+            }
+
+            // Wrap raw strings as string objects for consistency
+            let valueToStore = result.result;
+            if (typeof valueToStore === 'string') {
+                valueToStore = { type: 'string', value: valueToStore };
+            }
+
+            // Set the decoration
+            this.setDecoration(normalizedTarget, propName, valueToStore);
+
+            return {
+                type: "property_assignment",
+                result: valueToStore,
+                message: `${normalizedTarget}.${propName} = ${this.formatValue(valueToStore)}`
+            };
+        } catch (error) {
+            return {
+                type: "error",
+                message: `Property assignment error: ${error.message}`
+            };
+        }
+    }
+
     /**
      * Handle function definition
      */
@@ -721,11 +886,12 @@ export class VariableManager {
             staticDefaults[key] = this.freezeExpression(val, paramSet);
         }
 
-        this.functions.set(funcName, { params, body: staticBody, type: 'def', doc: doc || `User defined function: ${body}`, defaults: staticDefaults });
+        const normalizedFuncName = this.normalizeName(funcName);
+        this.functions.set(normalizedFuncName, { params, body: staticBody, type: 'def', doc: doc || `User defined function: ${body}`, defaults: staticDefaults });
         return {
             type: "function",
             result: null,
-            message: `Function ${funcName}[${params.join(",")}] defined`,
+            message: `Function ${normalizedFuncName}[${params.join(",")}] defined`,
         };
     }
 
@@ -733,14 +899,15 @@ export class VariableManager {
      * Handle function call
      */
     handleFunctionCall(funcName, argsStr) {
-        if (!this.functions.has(funcName)) {
+        const normalizedFuncName = this.normalizeName(funcName);
+        if (!this.functions.has(normalizedFuncName)) {
             return {
                 type: "error",
                 message: `Function ${funcName} not defined`,
             };
         }
 
-        const func = this.functions.get(funcName);
+        const func = this.functions.get(normalizedFuncName);
 
         // JS Function Handler shortcut
         if (func.type === 'js') {
@@ -856,8 +1023,9 @@ export class VariableManager {
                     // If it is a simple identifier, check if it is a function
                     // Regex must allow @@Mod@Name format
                     if (/^(?:@@[a-zA-Z0-9_]+@)?(?:@?[a-zA-Z0-9_]+)$/.test(trimmed)) {
-                        // Normalize: strip @ but respect @@
-                        const norm = trimmed.startsWith("@@") ? trimmed : (trimmed.startsWith("@") ? trimmed.substring(1) : trimmed);
+                        // Normalize: strip @ but respect @@, then apply case normalization
+                        const stripped = trimmed.startsWith("@@") ? trimmed : (trimmed.startsWith("@") ? trimmed.substring(1) : trimmed);
+                        const norm = this.normalizeName(stripped);
                         if (this.functions.has(norm)) {
                             argValues.push(norm);
                             continue;
@@ -1093,24 +1261,30 @@ export class VariableManager {
             // Helper to lookup variable in chain
             // Note: lookup logic is embedded in Variable Substitution section below or logic uses map merge for regex
             // But for explicit checks we need helpers
+            // Apply name normalization for case-insensitive lookup
             const hasVar = (name) => {
+                const normalized = this.normalizeName(name);
                 for (const scope of scopeChain) {
-                    if (scope.has(name)) return true;
+                    if (scope.has(normalized)) return true;
                     // Fallback for @ prefix
-                    if (name.startsWith('@') && scope.has(name.substring(1))) return true;
+                    if (name.startsWith('@') && scope.has(this.normalizeName(name.substring(1)))) return true;
                 }
-                if (this.variables.has(name)) return true;
-                if (name.startsWith('@') && this.variables.has(name.substring(1))) return true;
+                if (this.variables.has(normalized)) return true;
+                if (name.startsWith('@') && this.variables.has(this.normalizeName(name.substring(1)))) return true;
                 return false;
             };
             const getVar = (name) => {
+                const normalized = this.normalizeName(name);
                 for (const scope of scopeChain) {
-                    if (scope.has(name)) return scope.get(name);
+                    if (scope.has(normalized)) return scope.get(normalized);
                     // Fallback for @ prefix
-                    if (name.startsWith('@') && scope.has(name.substring(1))) return scope.get(name.substring(1));
+                    const strippedNorm = this.normalizeName(name.substring(1));
+                    if (name.startsWith('@') && scope.has(strippedNorm)) return scope.get(strippedNorm);
                 }
-                if (this.variables.has(name)) return this.variables.get(name);
-                if (name.startsWith('@') && this.variables.has(name.substring(1))) return this.variables.get(name.substring(1));
+                if (this.variables.has(normalized)) return this.variables.get(normalized);
+                if (name.startsWith('@') && this.variables.has(this.normalizeName(name.substring(1)))) {
+                    return this.variables.get(this.normalizeName(name.substring(1)));
+                }
                 return undefined;
             };
 
@@ -1151,8 +1325,8 @@ export class VariableManager {
             let substitutedFunctions = expression;
 
             // Function Call Substitution
-            // Matches: Name(args)
-            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))\s*\(/g;
+            // Matches: Name(args) including @@Anon@123_456 anonymous function names
+            const functionCallRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@[a-zA-Z0-9_]+)|(?:@?[_a-zA-Z][a-zA-Z0-9_]*))\s*\(/g;
             let match;
             while ((match = functionCallRegex.exec(substitutedFunctions)) !== null) {
                 const fullMatch = match[0];
@@ -1190,15 +1364,15 @@ export class VariableManager {
 
                 if (closeParenIndex !== -1) {
                     const argsStr = substitutedFunctions.substring(openParenIndex + 1, closeParenIndex);
-                    // Normalize function name
-                    const normalizedFuncName = funcName.startsWith("@@") ? funcName : (funcName.startsWith("@") ? funcName.substring(1) : funcName);
+                    // Normalize function name with case normalization
+                    const normalizedFuncName = this.normalizeName(funcName.startsWith("@@") ? funcName : (funcName.startsWith("@") ? funcName.substring(1) : funcName));
                     let funcDef = this.functions.get(normalizedFuncName);
 
                     // Alias Lookup in Scope Chain
                     if (!funcDef) {
                         const aliasVal = getVar(normalizedFuncName);
                         if (typeof aliasVal === 'string') {
-                            const aliasNorm = aliasVal.startsWith("@@") ? aliasVal : (aliasVal.startsWith("@") ? aliasVal.substring(1) : aliasVal);
+                            const aliasNorm = this.normalizeName(aliasVal.startsWith("@@") ? aliasVal : (aliasVal.startsWith("@") ? aliasVal.substring(1) : aliasVal));
                             if (this.functions.has(aliasNorm)) {
                                 funcDef = this.functions.get(aliasNorm);
                             } else {
@@ -1297,7 +1471,13 @@ export class VariableManager {
                             // We attach it to instance state temporarily.
                         } else {
                             // Eager Evaluation
-                            for (const arg of args) {
+                            for (let argIdx = 0; argIdx < args.length; argIdx++) {
+                                const arg = args[argIdx];
+                                const paramName = funcDef.params[argIdx] || '';
+                                const cleanParamName = paramName.replace(/\?$/, '');
+                                // Check if parameter expects a function (uppercase start)
+                                const isParamFunction = /^[A-Z]/.test(cleanParamName);
+                                
                                 const lambdaMatch = arg.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
                                 if (lambdaMatch) {
                                     const [, lParam, lBody] = lambdaMatch;
@@ -1312,6 +1492,24 @@ export class VariableManager {
                                 } else if (arg.trim() === '') {
                                     argValues.push(undefined);
                                 } else {
+                                    // Check if arg is a simple identifier that could be a function name
+                                    const trimmed = arg.trim();
+                                    if (/^(?:@@[a-zA-Z0-9_]+@)?(?:@?[A-Z][a-zA-Z0-9_]*)$/.test(trimmed)) {
+                                        // Looks like a function name (uppercase start)
+                                        const stripped = trimmed.startsWith("@@") ? trimmed : (trimmed.startsWith("@") ? trimmed.substring(1) : trimmed);
+                                        const norm = this.normalizeName(stripped);
+                                        if (this.functions.has(norm)) {
+                                            // Pass function name as string for HOC support
+                                            if (isParamFunction) {
+                                                argValues.push(norm);
+                                            } else {
+                                                // Lowercase param - pass the normalized name as string
+                                                argValues.push(norm);
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                    // Evaluate as expression
                                     const r = this.evaluateExpression(arg, scopeChain);
                                     if (r.type === 'error') throw new Error(r.message);
                                     argValues.push(r.result);
@@ -1429,12 +1627,29 @@ export class VariableManager {
                         continue;
                     }
 
-                    // Match identifier from here
+                    // Match identifier from here (including potential dot notation for property access)
                     const tail = substitutedFunctions.substring(i);
-                    const match = tail.match(/^((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))/);
+                    // Match identifier with optional .property suffix
+                    const match = tail.match(/^((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))(?:\.([_a-zA-Z][a-zA-Z0-9_]*))?/);
 
                     if (match) {
                         const token = match[1];
+                        const propertyName = match[2]; // May be undefined if no dot notation
+                        
+                        // Check for property access (P.type)
+                        if (propertyName) {
+                            const normalizedTarget = this.normalizeName(token.startsWith("@") ? token.substring(1) : token);
+                            const targetExists = hasVar(token) || this.functions.has(normalizedTarget);
+                            
+                            if (targetExists && this.hasDecoration(normalizedTarget, propertyName)) {
+                                const propValue = this.getDecoration(normalizedTarget, propertyName);
+                                const s = this.formatValueWithPrefix(propValue);
+                                finalExpr += s;
+                                i += match[0].length; // Skip full match including .property
+                                continue;
+                            }
+                        }
+                        
                         // Check if known variable
                         if (hasVar(token)) {
                             // AMBIGUITY CHECK
@@ -1460,8 +1675,8 @@ export class VariableManager {
                             i += token.length;
                             continue;
                         }
-                        // Check if known function (used as value)
-                        else if (this.functions.has(token)) { // && !token.includes('@') check disabled strictly
+                        // Check if known function (used as value) - with normalization
+                        else if (this.functions.has(this.normalizeName(token))) { // && !token.includes('@') check disabled strictly
                             // Strict usage: if simple name 'A' and base has 'A', ambiguous?
                             // Logic copied from previous implementation:
                             let isAmbiguous = false;
@@ -1512,11 +1727,12 @@ export class VariableManager {
                 const tokens = trimmed.split(/[^a-zA-Z0-9@_]/).filter(t => t.length > 0);
                 for (const token of tokens) {
                     const rawName = token.startsWith("@@") ? token : (token.startsWith("@") ? token.substring(1) : token);
-                    if (this.functions.has(rawName)) {
+                    const normalizedName = this.normalizeName(rawName);
+                    if (this.functions.has(normalizedName)) {
                         if (tokens.length > 1 || trimmed.includes("(") || trimmed.includes(")")) {
-                            throw new Error(`Function '${rawName}' cannot be used as a value in this context`);
+                            throw new Error(`Function '${normalizedName}' cannot be used as a value in this context`);
                         }
-                        return { type: "expression", result: rawName };
+                        return { type: "expression", result: normalizedName };
                     }
                 }
                 throw parseError;
@@ -1533,6 +1749,11 @@ export class VariableManager {
      */
     formatValueWithPrefix(value) {
         if (!value) return "0";
+
+        // Handle string type - return as quoted string literal
+        if (value.type === "string") {
+            return `"${value.value}"`;
+        }
 
         if (value.type === "sequence") {
             const formatted = value.values.map(v => this.formatValueWithPrefix(v));
@@ -1566,6 +1787,10 @@ export class VariableManager {
      * Format a value for display
      */
     formatValue(value) {
+        // Handle string type
+        if (value && value.type === "string") {
+            return `"${value.value}"`;
+        }
         if (value && value.type === "sequence") {
             // Format sequence as [val1, val2, val3, ...]
             const formattedValues = value.values.map((v) => this.formatValue(v));
@@ -1892,5 +2117,84 @@ export class VariableManager {
         }
 
         return staticExpr;
+    }
+
+    /**
+     * Set a decoration property on a variable or function
+     * @param {string} name - Variable or function name
+     * @param {string} propName - Property name
+     * @param {any} value - Property value
+     */
+    setDecoration(name, propName, value) {
+        const normalizedName = this.normalizeName(name);
+        if (!this.decorations.has(normalizedName)) {
+            this.decorations.set(normalizedName, new Map());
+        }
+        this.decorations.get(normalizedName).set(propName, value);
+    }
+
+    /**
+     * Get a decoration property from a variable or function
+     * @param {string} name - Variable or function name
+     * @param {string} propName - Property name
+     * @returns {any} - Property value or undefined
+     */
+    getDecoration(name, propName) {
+        const normalizedName = this.normalizeName(name);
+        if (!this.decorations.has(normalizedName)) {
+            return undefined;
+        }
+        return this.decorations.get(normalizedName).get(propName);
+    }
+
+    /**
+     * Check if a decoration property exists
+     * @param {string} name - Variable or function name
+     * @param {string} propName - Property name
+     * @returns {boolean}
+     */
+    hasDecoration(name, propName) {
+        const normalizedName = this.normalizeName(name);
+        if (!this.decorations.has(normalizedName)) {
+            return false;
+        }
+        return this.decorations.get(normalizedName).has(propName);
+    }
+
+    /**
+     * Delete a decoration property
+     * @param {string} name - Variable or function name
+     * @param {string} propName - Property name
+     * @returns {boolean} - True if deleted
+     */
+    deleteDecoration(name, propName) {
+        const normalizedName = this.normalizeName(name);
+        if (!this.decorations.has(normalizedName)) {
+            return false;
+        }
+        return this.decorations.get(normalizedName).delete(propName);
+    }
+
+    /**
+     * Get all decoration properties for a variable or function
+     * @param {string} name - Variable or function name
+     * @returns {Map|undefined} - Map of property names to values
+     */
+    getDecorations(name) {
+        const normalizedName = this.normalizeName(name);
+        return this.decorations.get(normalizedName);
+    }
+
+    /**
+     * Get all decoration property names for a variable or function
+     * @param {string} name - Variable or function name
+     * @returns {string[]} - Array of property names
+     */
+    getDecorationKeys(name) {
+        const normalizedName = this.normalizeName(name);
+        if (!this.decorations.has(normalizedName)) {
+            return [];
+        }
+        return Array.from(this.decorations.get(normalizedName).keys());
     }
 }

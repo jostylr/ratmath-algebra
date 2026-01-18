@@ -11,5 +11,6 @@ export {
     getHelpTopics,
     getHelpText,
     hasHelpTopic,
-    getHelpTopicsText
+    getHelpTopicsText,
+    getHelpIntroText
 } from "./help-registry.js";

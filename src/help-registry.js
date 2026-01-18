@@ -127,13 +127,16 @@ OPERATORS (precedence high to low):
   * /                     Multiplication, division
   + -                     Addition, subtraction
 
-VARIABLES:
-  lowercase               Single lowercase letter (a-z)
-  _name                   Environment variable
+NAMES:
+  Variables (values):
+    x, myVar, aVar        Start with lowercase letter
+    aVar = avar           Case-insensitive after first char
+    _precision            Underscore prefix = environment var
 
-FUNCTIONS:
-  Uppercase(args)         Function call
-  Name(args) -> body      Function definition
+  Functions/Lists (callable):
+    Sq, MyFunc, Avar      Start with Uppercase letter
+    Sq(x) -> x^2          Function definition
+    List = [1, 2, 3]      List/accessor definition
 `,
 
     string: `String Functions - Standard Library
@@ -161,6 +164,39 @@ TRANSFORM:
 SPLIT/JOIN:
   SPLIT(str, delim)       - Split into list
   JOIN(list, delim)       - Join list into string
+`,
+
+    objects: `Object Properties - Property Decoration System
+
+Attach metadata properties to variables and functions using dot notation.
+
+PROPERTY ASSIGNMENT:
+  P.type = "poly"         - Set property on variable/function
+  x.order = 3             - Numeric properties
+  F.Derivative = "DF"     - Store function references
+
+PROPERTY ACCESS:
+  P.type                  - Read property in expressions
+  x.order + 2             - Use property values in calculations
+
+FUNCTIONS:
+  Get(target, prop, default?) - Get property value
+  Set(target, prop, value)    - Set property value
+  Has(target, prop)           - Check if property exists (returns 1/0)
+  Del(target, prop)           - Delete property (returns 1/0)
+  Type(target, check?)        - Get/check "type" property
+  Props(target)               - Get list of all property names
+  CopyProps(src, dest)        - Copy all properties
+  ClearProps(target)          - Clear all properties
+
+EXAMPLES:
+  P(x) -> x^2
+  P.type = "poly"
+  P.degree = 2
+  Type("P")               → "poly"
+  Has("P", "degree")      → 1
+  Props("P")              → ["type", "degree"]
+  P.degree * 3            → 6
 `,
 
     trig: `Trigonometric Functions (requires: LOAD reals)
@@ -214,6 +250,11 @@ export function getHelpTopics() {
 export function getHelpText(topic) {
     const lower = topic.toLowerCase();
     
+    // Special case: "topics" returns the full topics listing
+    if (lower === "topics") {
+        return getHelpTopicsText();
+    }
+    
     // Check static help
     if (StaticHelp[lower]) {
         return StaticHelp[lower];
@@ -239,6 +280,28 @@ export function hasHelpTopic(topic) {
 }
 
 /**
+ * Get the essential help intro (default HELP with no args)
+ */
+export function getHelpIntroText() {
+    return `RatMath Calculator - Rational Interval Arithmetic
+
+BASICS:
+  3/4 + 1/2         Fractions
+  2:5               Interval from 2 to 5
+  x = 3/4           Assign variable (lowercase start)
+  Sq(x) -> x^2      Define function (Uppercase start)
+
+COMMANDS:
+  HELP topics       All help topics
+  HELP syntax       Number formats & operators
+  HELP packages     Available packages
+  LOAD reals        Load transcendental functions
+
+Type HELP <topic> for details.
+`;
+}
+
+/**
  * Get the full help topics listing
  */
 export function getHelpTopicsText() {
@@ -249,6 +312,7 @@ STDLIB (always available):
   HELP logic        - Comparison and boolean operations
   HELP list         - Lists, sequences, higher-order functions
   HELP string       - String manipulation functions
+  HELP objects      - Property decoration system
 
 SYNTAX:
   HELP syntax       - Quick syntax reference
