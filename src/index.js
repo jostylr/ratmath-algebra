@@ -7,3 +7,9 @@ export {
     resolveDependencies,
     getPackagesHelpText 
 } from "./package-registry.js";
+export {
+    getHelpTopics,
+    getHelpText,
+    hasHelpTopic,
+    getHelpTopicsText
+} from "./help-registry.js";

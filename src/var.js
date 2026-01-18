@@ -8,6 +8,7 @@
 import { Rational, RationalInterval, Integer, BaseSystem } from "@ratmath/core";
 import { Parser } from "@ratmath/parser";
 import { PackageRegistry, getPackageInfo, resolveDependencies, getPackagesHelpText } from "./package-registry.js";
+import { getHelpText, hasHelpTopic, getHelpTopicsText } from "./help-registry.js";
 
 export class VariableManager {
     constructor() {
@@ -78,15 +79,28 @@ export class VariableManager {
     }
 
     /**
-     * Get help/documentation for a function or package
-     * @param {string} [name] - Function or package name (optional)
+     * Get help/documentation for a function, package, or topic
+     * @param {string} [name] - Function, package, or topic name (optional)
      * @returns {string} - Help text
      */
     getHelp(name) {
         if (name) {
+            const lower = name.toLowerCase();
+            
             // Check for "packages" keyword
-            if (name.toLowerCase() === "packages") {
+            if (lower === "packages") {
                 return getPackagesHelpText();
+            }
+            
+            // Check for "topics" keyword - list all help topics
+            if (lower === "topics") {
+                return getHelpTopicsText();
+            }
+
+            // Check help registry for topics (core, logic, list, syntax, trig, etc.)
+            const helpText = getHelpText(lower);
+            if (helpText) {
+                return helpText;
             }
 
             // Check if it's a package name
@@ -103,17 +117,11 @@ export class VariableManager {
                 const sig = `${normalized}(${f.params.join(", ")})`;
                 return `${sig}\n${f.doc || "No documentation available."}`;
             }
-            return `'${name}' not found. Type HELP packages to see available packages.`;
+            return `'${name}' not found. Type HELP topics or HELP packages.`;
         }
 
-        // List all functions with short doc
-        const entries = [];
-        for (const [fname, f] of this.functions) {
-            let snippet = f.doc ? f.doc.split('\n')[0] : "";
-            if (snippet.length > 50) snippet = snippet.substring(0, 47) + "...";
-            entries.push(`${fname}(${f.params.join(",")}) - ${snippet}`);
-        }
-        return `Available Functions:\n${entries.join('\n')}\n\nType HELP packages to see available packages.`;
+        // No argument - show overview
+        return getHelpTopicsText();
     }
 
     /**
@@ -161,22 +169,13 @@ export class VariableManager {
         if (scope.functions) {
             for (const [name, def] of Object.entries(scope.functions)) {
                 const qualifiedName = `${prefix}${name}`;
-                this.functions.set(qualifiedName, { ...def });
-                // Also alias simple name if not conflicting?
-                // User said: "LOAD @@Module to put all the functions and variables in the Module in the current active space"
-                // This implies making them available WITHOUT prefix too?
-                // "Also a command LOAD @@Module to put all ... in the current active space"
-                // And "namespacing convention of @@Module@Func ... so @@ is for Module name"
-                // I'll assume LOAD makes them available as `Name` (overwriting?) AND `@@Module@Name` is always available if module is known?
-                // Or maybe LOAD copies them to main namespace.
-
-                // Let's implement LOAD as: Import scoped items into main namespace.
-                // The @@Module@Name convention might be for storage or direct access?
-                // If I store them as `@@Module@Name`, user has to type that. 
-                // LOAD matches "using namespace" in C++.
-
-                // Let's store as fully qualified, and also create aliases in main map.
-                this.functions.set(name, { ...def, isImported: true, module: moduleName });
+                // Normalize: some modules use 'body' instead of 'handler' for JS functions
+                const normalizedDef = { ...def };
+                if (normalizedDef.body && !normalizedDef.handler) {
+                    normalizedDef.handler = normalizedDef.body;
+                }
+                this.functions.set(qualifiedName, normalizedDef);
+                this.functions.set(name, { ...normalizedDef, isImported: true, module: moduleName });
             }
         }
 
