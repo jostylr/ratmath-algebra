@@ -7,12 +7,14 @@
 
 import { Rational, RationalInterval, Integer, BaseSystem } from "@ratmath/core";
 import { Parser } from "@ratmath/parser";
+import { PackageRegistry, getPackageInfo, resolveDependencies, getPackagesHelpText } from "./package-registry.js";
 
 export class VariableManager {
     constructor() {
         this.variables = new Map(); // Store single-character variables
         this.functions = new Map(); // Store function definitions
         this.modules = new Map();   // Store loaded modules { name: string, content: object }
+        this.loadedPackages = new Set(); // Track loaded packages from registry
         this.inputBase = null; // Base system for interpreting numbers without explicit base notation
         this.customBases = new Map(); // Store custom base definitions
 
@@ -76,19 +78,32 @@ export class VariableManager {
     }
 
     /**
-     * Get help/documentation for a function
-     * @param {string} [name] - Function name (optional)
+     * Get help/documentation for a function or package
+     * @param {string} [name] - Function or package name (optional)
      * @returns {string} - Help text
      */
     getHelp(name) {
         if (name) {
+            // Check for "packages" keyword
+            if (name.toLowerCase() === "packages") {
+                return getPackagesHelpText();
+            }
+
+            // Check if it's a package name
+            const pkgInfo = getPackageInfo(name);
+            if (pkgInfo) {
+                const loaded = this.loadedPackages.has(pkgInfo.key) ? " [LOADED]" : "";
+                return `${pkgInfo.name}${loaded}\n${pkgInfo.help || pkgInfo.description}`;
+            }
+
+            // Check for function
             const normalized = name.startsWith("@@") ? name : (name.startsWith("@") ? name.substring(1) : name);
             if (this.functions.has(normalized)) {
                 const f = this.functions.get(normalized);
                 const sig = `${normalized}(${f.params.join(", ")})`;
                 return `${sig}\n${f.doc || "No documentation available."}`;
             }
-            return `Function '${name}' not found.`;
+            return `'${name}' not found. Type HELP packages to see available packages.`;
         }
 
         // List all functions with short doc
@@ -98,7 +113,40 @@ export class VariableManager {
             if (snippet.length > 50) snippet = snippet.substring(0, 47) + "...";
             entries.push(`${fname}(${f.params.join(",")}) - ${snippet}`);
         }
-        return `Available Functions:\n${entries.join('\n')}`;
+        return `Available Functions:\n${entries.join('\n')}\n\nType HELP packages to see available packages.`;
+    }
+
+    /**
+     * Check if a package is loaded
+     * @param {string} packageName - Package name (case-insensitive)
+     * @returns {boolean}
+     */
+    isPackageLoaded(packageName) {
+        return this.loadedPackages.has(packageName.toLowerCase());
+    }
+
+    /**
+     * Get set of loaded packages
+     * @returns {Set<string>}
+     */
+    getLoadedPackages() {
+        return new Set(this.loadedPackages);
+    }
+
+    /**
+     * Mark a package as loaded (called after loadModule for registry packages)
+     * @param {string} packageName - Package name
+     */
+    markPackageLoaded(packageName) {
+        this.loadedPackages.add(packageName.toLowerCase());
+    }
+
+    /**
+     * Mark a package as unloaded
+     * @param {string} packageName - Package name
+     */
+    markPackageUnloaded(packageName) {
+        this.loadedPackages.delete(packageName.toLowerCase());
     }
 
     /**
