@@ -173,19 +173,33 @@ Attach metadata properties to variables and functions using dot notation.
 PROPERTY ASSIGNMENT:
   P.type = "poly"         - Set property on variable/function
   x.order = 3             - Numeric properties
-  F.Derivative = "DF"     - Store function references
+  P.Der = x->2*x          - Store function references
+
+OBJECT LITERALS:
+  P = {a=5, b=10}         - Create object with properties
+  P = {}                  - Empty object
+  P = {_eval=x->x^2}      - Object with evaluation function
+  Set("P", {a=5, b=c})    - Set multiple properties at once
+
+INTERNAL PROPERTIES (underscore prefix):
+  _eval       - Function called when object is evaluated: P(x)
+  _display    - Custom display when typing P (e.g., "5x^3 + 3x^2")
+  _definition - Store original definition for restoration
 
 PROPERTY ACCESS:
   P.type                  - Read property in expressions
   x.order + 2             - Use property values in calculations
+  P.Der(5)                - Call function stored as property
 
 FUNCTIONS:
   Get(target, prop, default?) - Get property value
-  Set(target, prop, value)    - Set property value
+  Set(target, p1, v1, ...)    - Set unlimited properties
   Has(target, prop)           - Check if property exists (returns 1/0)
   Del(target, prop)           - Delete property (returns 1/0)
   Type(target, check?)        - Get/check "type" property
   Props(target)               - Get list of all property names
+  Info(P)                     - Show definition and all properties
+  Info(P, "filter")           - Filter properties by substring
   CopyProps(src, dest)        - Copy all properties
   ClearProps(target)          - Clear all properties
 
@@ -193,10 +207,14 @@ EXAMPLES:
   P(x) -> x^2
   P.type = "poly"
   P.degree = 2
-  Type("P")               → "poly"
-  Has("P", "degree")      → 1
-  Props("P")              → ["type", "degree"]
-  P.degree * 3            → 6
+  Info(P)                 → P(x) -> x^2
+                              type = poly
+                              degree = 2
+  
+  Q = {a=5, b=10, _display="custom"}
+  Info(Q)                 → custom
+                              a = 5
+                              b = 10
 `,
 
     trig: `Trigonometric Functions (requires: LOAD reals)

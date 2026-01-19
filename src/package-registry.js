@@ -123,19 +123,68 @@ Planned features:
     // Arithmetic functions
     "arith-funs": {
         name: "ArithFuns",
-        description: "Additional arithmetic functions (GCD, LCM, primes, etc.)",
+        description: "Polynomials, number theory, rational functions, piecewise functions",
         requires: [],
-        functions: [],
+        functions: [
+            // Core Arithmetic
+            "Abs", "Sign", "Max", "Min", "Floor", "Ceil", "Round", "Trunc", "Frac",
+            "Numer", "Denom", "Reciprocal", "Neg", "Cmp", "Eq", "Lt", "Le", "Gt", "Ge", "Between",
+            // Number Theory
+            "Gcd", "Lcm", "ExtGcd", "Divides", "Mod", "Quot", "DivMod", "Coprime",
+            "IsPrime", "NextPrime", "PrevPrime", "Factor", "Divisors", "DivisorCount", "DivisorSum",
+            "ModPow", "ModInv", "EulerPhi", "Mobius",
+            "Factorial", "Binomial", "Permutations", "Fibonacci", "Lucas", "Catalan",
+            "Harmonic", "Bernoulli",
+            // Polynomials
+            "Poly", "PolyDeg", "PolyCoeffs", "PolyCoeff", "PolyEval", "PolyHorner",
+            "PolyAdd", "PolySub", "PolyMul", "PolyScale", "PolyNeg", "PolyDer", "PolyInt",
+            "SynthDiv", "SynthDivPoly", "SynthDivRem", "PolyRebase",
+            "PolySignChanges", "PolyDescartes", "PolyRatRoots",
+            // Rational Functions
+            "RatFunc", "RatFuncNumer", "RatFuncDenom", "RatFuncEval",
+            "PartialFrac", "PartialFracSteps",
+            // Piecewise
+            "Step", "UnitStep", "Rect", "Ramp", "Clamp", "Sgn",
+            "Chi", "ChiOpen", "ChiLeftOpen", "ChiRightOpen",
+            "Piecewise", "PiecewiseEval"
+        ],
         help: `
 ArithFuns Package - Arithmetic Functions
 
-This package provides additional number-theoretic functions.
-(Currently in development)
+Provides polynomials, number theory, rational functions, and piecewise operations.
 
-Planned features:
-- GCD, LCM, extended Euclidean algorithm
-- Prime testing, factorization
-- Modular arithmetic
+CATEGORIES:
+  Polynomials       - Poly, PolyEval, SynthDiv, PolyRebase, PolyDescartes
+  Number Theory     - Gcd, Lcm, Factor, IsPrime, ModPow, EulerPhi
+  Rational Funcs    - RatFunc, PartialFrac
+  Piecewise         - Piecewise, Step, Rect, Clamp
+  Core Arithmetic   - Abs, Sign, Floor, Ceil, Max, Min
+
+POLYNOMIALS:
+  Poly({1, 2, 3})           - Create 1 + 2x + 3x²
+  PolyEval(P, x)            - Evaluate at x
+  SynthDiv(P, c)            - Synthetic division by (x - c)
+  PolyRebase(P, a)          - Taylor expansion at x = a
+  PolyDescartes(P)          - Descartes' Rule of Signs
+  PolyRatRoots(P)           - Find rational roots
+
+NUMBER THEORY:
+  Gcd(a, b, ...)            - Greatest common divisor
+  Factor(n)                 - Prime factorization
+  IsPrime(n)                - Primality test
+  ModPow(b, e, m)           - b^e mod m
+  Binomial(n, k)            - n choose k
+
+STEP/PIECEWISE:
+  Step(x)                   - Heaviside step
+  Rect(x, a, b)             - Rectangle function
+  Clamp(x, lo, hi)          - Clamp to range
+
+HELP TOPICS:
+  HELP polynomial           - Polynomial operations
+  HELP synth-div            - Synthetic division details
+  HELP number-theory        - Number-theoretic functions
+  HELP piecewise            - Piecewise and step functions
 `
     },
 

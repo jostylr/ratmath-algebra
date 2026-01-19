@@ -660,6 +660,33 @@ export class VariableManager {
                     }
 
                     const f = this.functions.get(normalizedName);
+                    
+                    // Check for _display property for custom display
+                    const displayProp = this.getDecoration(normalizedName, "_display");
+                    if (displayProp) {
+                        // If _display is a function, call it; otherwise use as string
+                        let displayStr;
+                        if (typeof displayProp === 'string' && this.functions.has(displayProp)) {
+                            // It's a function reference, call it
+                            try {
+                                const dispResult = this.evaluateExpression(`${displayProp}()`);
+                                displayStr = dispResult.type !== 'error' ? this.formatValue(dispResult.result) : displayProp;
+                            } catch {
+                                displayStr = displayProp;
+                            }
+                        } else if (displayProp.type === 'string') {
+                            displayStr = displayProp.value;
+                        } else {
+                            displayStr = this.formatValue(displayProp);
+                        }
+                        return {
+                            type: "function_display",
+                            result: displayStr,
+                            message: displayStr
+                        };
+                    }
+                    
+                    // Default display
                     return {
                         type: "function_display",
                         result: `${normalizedName}(${f.params.join(", ")}) -> ${f.body}`,
@@ -710,28 +737,85 @@ export class VariableManager {
                 }
             }
 
-            // 2. Check for List/Sequence Assignment
-            // Evaluate expression to see if it's a list
+            // 2. Check for List/Sequence or Object Assignment
+            // Evaluate expression to see if it's a list or object
             try {
                 const result = this.evaluateExpression(expression);
-                if (result.type !== "error" && result.result && result.result.type === "sequence") {
+                if (result.type !== "error" && result.result) {
                     const normTarget = this.normalizeName(varName.startsWith("@") ? varName.substring(1) : varName);
-                    // Store as List Accessor Function
-                    // L(i) -> element
-                    // L(0) -> full list
-                    // L(-i) -> from end
-                    this.functions.set(normTarget, {
-                        type: 'list_accessor',
-                        list: result.result,
-                        params: ['index'],
-                        doc: `List Accessor for ${this.formatValue(result.result)}`
-                    });
+                    
+                    if (result.result.type === "sequence") {
+                        // Store as List Accessor Function
+                        // L(i) -> element
+                        // L(0) -> full list
+                        // L(-i) -> from end
+                        this.functions.set(normTarget, {
+                            type: 'list_accessor',
+                            list: result.result,
+                            params: ['index'],
+                            doc: `List Accessor for ${this.formatValue(result.result)}`
+                        });
 
-                    return {
-                        type: "function",
-                        result: result.result,
-                        message: `List Accessor ${normTarget} defined. ${normTarget}(i) to access elements.`
-                    };
+                        return {
+                            type: "function",
+                            result: result.result,
+                            message: `List Accessor ${normTarget} defined. ${normTarget}(i) to access elements.`
+                        };
+                    }
+                    
+                    if (result.result.type === "object") {
+                        // Object assignment: P = {a=5, b=10, _eval=x->...}
+                        // Create an "object" function that stores properties
+                        const obj = result.result;
+                        
+                        // Check for special properties
+                        const hasEval = obj.properties.has("_eval");
+                        const hasDisplay = obj.properties.has("_display");
+                        const hasDefinition = obj.properties.has("_definition");
+                        
+                        // Create function definition based on _eval or default identity
+                        if (hasEval) {
+                            const evalFunc = obj.properties.get("_eval");
+                            // If _eval is a lambda reference, use its definition
+                            if (typeof evalFunc === 'string' && this.functions.has(evalFunc)) {
+                                const funcDef = this.functions.get(evalFunc);
+                                this.functions.set(normTarget, {
+                                    ...funcDef,
+                                    type: 'object_function',
+                                    objectProps: obj.properties
+                                });
+                            } else {
+                                // Store as object with eval property
+                                this.functions.set(normTarget, {
+                                    type: 'object_function',
+                                    params: ['x'],
+                                    body: '_eval(x)',
+                                    objectProps: obj.properties,
+                                    doc: `Object ${normTarget}`
+                                });
+                            }
+                        } else {
+                            // No _eval, just store as object holder
+                            this.functions.set(normTarget, {
+                                type: 'object_function',
+                                params: [],
+                                objectProps: obj.properties,
+                                doc: `Object ${normTarget}`
+                            });
+                        }
+                        
+                        // Copy all properties as decorations
+                        for (const [key, value] of obj.properties) {
+                            this.setDecoration(normTarget, key, value);
+                        }
+                        
+                        const propCount = obj.properties.size;
+                        return {
+                            type: "function",
+                            result: obj,
+                            message: `Object ${normTarget} defined with ${propCount} properties.`
+                        };
+                    }
                 }
             } catch (e) {
                 // Ignore eval errors, fall through to error message
@@ -817,10 +901,13 @@ export class VariableManager {
             // Set the decoration
             this.setDecoration(normalizedTarget, propName, valueToStore);
 
+            // Return the formatted value as a string for better display
+            const formattedValue = this.formatValue(valueToStore);
+            
             return {
                 type: "property_assignment",
-                result: valueToStore,
-                message: `${normalizedTarget}.${propName} = ${this.formatValue(valueToStore)}`
+                result: formattedValue,
+                message: `${normalizedTarget}.${propName} = ${formattedValue}`
             };
         } catch (error) {
             return {
@@ -1258,6 +1345,85 @@ export class VariableManager {
                 return { type: 'expression', result: anonName };
             }
 
+            // Check for Object Literal {a=5, b=c, Der=x->x^2}
+            const trimmedExpr = expression.trim();
+            if (trimmedExpr.startsWith('{') && trimmedExpr.endsWith('}')) {
+                const inner = trimmedExpr.slice(1, -1).trim();
+                if (inner.length === 0) {
+                    // Empty object
+                    return { type: 'expression', result: { type: 'object', properties: new Map() } };
+                }
+                
+                // Parse comma-separated key=value pairs, respecting nested brackets/parens
+                const pairs = [];
+                let current = '';
+                let depth = 0;
+                let inString = false;
+                
+                for (let i = 0; i < inner.length; i++) {
+                    const char = inner[i];
+                    if (char === '"') {
+                        let backslashCount = 0;
+                        let j = i - 1;
+                        while (j >= 0 && inner[j] === '\\') { backslashCount++; j--; }
+                        if (backslashCount % 2 === 0) inString = !inString;
+                    }
+                    if (!inString) {
+                        if (char === '(' || char === '[' || char === '{') depth++;
+                        else if (char === ')' || char === ']' || char === '}') depth--;
+                    }
+                    if (char === ',' && depth === 0 && !inString) {
+                        pairs.push(current.trim());
+                        current = '';
+                    } else {
+                        current += char;
+                    }
+                }
+                if (current.trim()) pairs.push(current.trim());
+                
+                // Parse each pair as key=value
+                const properties = new Map();
+                for (const pair of pairs) {
+                    // Find first = that's not inside nested structure
+                    let eqIndex = -1;
+                    let pDepth = 0;
+                    let pInString = false;
+                    for (let i = 0; i < pair.length; i++) {
+                        const char = pair[i];
+                        if (char === '"') {
+                            let backslashCount = 0;
+                            let j = i - 1;
+                            while (j >= 0 && pair[j] === '\\') { backslashCount++; j--; }
+                            if (backslashCount % 2 === 0) pInString = !pInString;
+                        }
+                        if (!pInString) {
+                            if (char === '(' || char === '[' || char === '{') pDepth++;
+                            else if (char === ')' || char === ']' || char === '}') pDepth--;
+                            else if (char === '=' && pDepth === 0) {
+                                eqIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (eqIndex === -1) {
+                        throw new Error(`Invalid object literal: missing '=' in '${pair}'`);
+                    }
+                    
+                    const key = pair.slice(0, eqIndex).trim();
+                    const valueExpr = pair.slice(eqIndex + 1).trim();
+                    
+                    // Evaluate the value expression
+                    const valueResult = this.evaluateExpression(valueExpr, scopeChain);
+                    if (valueResult.type === 'error') {
+                        throw new Error(`Error evaluating '${key}': ${valueResult.message}`);
+                    }
+                    properties.set(key, valueResult.result);
+                }
+                
+                return { type: 'expression', result: { type: 'object', properties } };
+            }
+
             // Helper to lookup variable in chain
             // Note: lookup logic is embedded in Variable Substitution section below or logic uses map merge for regex
             // But for explicit checks we need helpers
@@ -1323,6 +1489,32 @@ export class VariableManager {
             }
 
             let substitutedFunctions = expression;
+
+            // Property-based function call substitution (P.Der(5) -> resolvedFunc(5))
+            // Must happen before regular function call handling
+            const propertyCallRegex = /([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
+            let propMatch;
+            while ((propMatch = propertyCallRegex.exec(substitutedFunctions)) !== null) {
+                const targetName = propMatch[1];
+                const propName = propMatch[2];
+                const normalizedTarget = this.normalizeName(targetName);
+                
+                // Check if target has this property with a function reference
+                if (this.hasDecoration(normalizedTarget, propName)) {
+                    const propValue = this.getDecoration(normalizedTarget, propName);
+                    // If property is a string (function name), substitute it
+                    if (propValue && propValue.type === 'string' && propValue.value) {
+                        const funcName = propValue.value;
+                        // Replace "Target.Prop(" with "funcName("
+                        const fullPropertyCall = `${targetName}.${propName}`;
+                        substitutedFunctions = substitutedFunctions.replace(
+                            new RegExp(fullPropertyCall.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\(', 'g'),
+                            funcName + '('
+                        );
+                        propertyCallRegex.lastIndex = 0; // Reset regex after substitution
+                    }
+                }
+            }
 
             // Function Call Substitution
             // Matches: Name(args) including @@Anon@123_456 anonymous function names
@@ -1564,6 +1756,13 @@ export class VariableManager {
                             resultVal = r.result;
                         }
 
+                        // If the function call is the entire expression and returns a string,
+                        // return it directly to avoid re-parsing issues
+                        if (startIndex === 0 && closeParenIndex === substitutedFunctions.length - 1 &&
+                            resultVal && resultVal.type === 'string') {
+                            return { type: "expression", result: resultVal };
+                        }
+
                         const resultStr = this.formatValueWithPrefix(resultVal);
 
                         substitutedFunctions = substitutedFunctions.substring(0, startIndex) +
@@ -1574,6 +1773,19 @@ export class VariableManager {
                         continue;
                     }
                 }
+            }
+
+            // Early check: if the entire expression after function substitution is just a string literal,
+            // return it directly without further parsing (avoids issues with special chars in strings)
+            const trimmedSub = substitutedFunctions.trim();
+            const stringOnlyMatch = trimmedSub.match(/^"((?:[^"\\]|\\.)*)"\s*$/);
+            if (stringOnlyMatch) {
+                const unescaped = stringOnlyMatch[1]
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\r/g, '\r')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\\\/g, '\\');
+                return { type: "expression", result: { type: "string", value: unescaped } };
             }
 
             // Variable Substitution
@@ -1710,6 +1922,18 @@ export class VariableManager {
                 return this.handleSpecialFunction(keyword, variable, expr, start, end, increment || "1");
             }
 
+            // Check if the entire expression is just a string literal
+            const stringLiteralMatch = preprocessed.match(/^"((?:[^"\\]|\\.)*)"\s*$/);
+            if (stringLiteralMatch) {
+                // Unescape the string and return it directly
+                const unescaped = stringLiteralMatch[1]
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\r/g, '\r')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\\\/g, '\\');
+                return { type: "expression", result: { type: "string", value: unescaped } };
+            }
+
             let result;
             try {
                 result = Parser.parse(preprocessed, {
@@ -1732,6 +1956,12 @@ export class VariableManager {
                         if (tokens.length > 1 || trimmed.includes("(") || trimmed.includes(")")) {
                             throw new Error(`Function '${normalizedName}' cannot be used as a value in this context`);
                         }
+                        // Format function reference nicely
+                        const funcDef = this.functions.get(normalizedName);
+                        if (funcDef.params && funcDef.body) {
+                            const params = funcDef.params.join(", ");
+                            return { type: "expression", result: `${params} -> ${funcDef.body}` };
+                        }
                         return { type: "expression", result: normalizedName };
                     }
                 }
@@ -1752,12 +1982,34 @@ export class VariableManager {
 
         // Handle string type - return as quoted string literal
         if (value.type === "string") {
-            return `"${value.value}"`;
+            // Check if this string is a function reference
+            const funcName = value.value;
+            if (funcName && this.functions.has(funcName)) {
+                const funcDef = this.functions.get(funcName);
+                // Return the function name for substitution (it will be called later)
+                return funcName;
+            }
+            // Escape newlines and backslashes for safe substitution
+            // Use String.raw or explicit escaping to get literal backslash-n
+            const escaped = value.value
+                .replace(/\\/g, '\\\\')
+                .replace(/\n/g, '\\' + 'n')
+                .replace(/\r/g, '\\' + 'r')
+                .replace(/"/g, '\\"');
+            return `"${escaped}"`;
         }
 
         if (value.type === "sequence") {
             const formatted = value.values.map(v => this.formatValueWithPrefix(v));
             return `[${formatted.join(", ")}]`;
+        }
+
+        if (value.type === "object") {
+            const pairs = [];
+            for (const [key, val] of value.properties) {
+                pairs.push(`${key}=${this.formatValueWithPrefix(val)}`);
+            }
+            return `{${pairs.join(", ")}}`;
         }
 
         if (value instanceof RationalInterval) {
@@ -1789,6 +2041,16 @@ export class VariableManager {
     formatValue(value) {
         // Handle string type
         if (value && value.type === "string") {
+            // Check if this string is a function reference
+            const funcName = value.value;
+            if (funcName && this.functions.has(funcName)) {
+                const funcDef = this.functions.get(funcName);
+                // Format as function definition
+                if (funcDef.params && funcDef.body) {
+                    const params = funcDef.params.join(", ");
+                    return `${params} -> ${funcDef.body}`;
+                }
+            }
             return `"${value.value}"`;
         }
         if (value && value.type === "sequence") {
@@ -2050,7 +2312,8 @@ export class VariableManager {
         const varRegex = /(?:^|[^a-zA-Z0-9_@])((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))/g;
         staticExpr = staticExpr.replace(varRegex, (fullMatch, identifier, offset, string) => {
             const prefix = fullMatch.substring(0, fullMatch.indexOf(identifier));
-            const norm = identifier.replace(/^@/, '');
+            const rawName = identifier.replace(/^@/, '');
+            const norm = this.normalizeName(rawName);
 
             // Check placeholders
             if (identifier.startsWith("__STR_") && identifier.endsWith("__")) return fullMatch;
@@ -2072,9 +2335,10 @@ export class VariableManager {
                 const timestamp = Date.now().toString(36);
                 const random = Math.random().toString(36).substring(2, 6);
                 const snapshotName = `@@Static@${norm}_${timestamp}${random}`;
+                const normalizedSnapshotName = this.normalizeName(snapshotName);
                 const snapshotFunc = { ...originalFunc, type: 'def', doc: `[Snapshot] ${originalFunc.doc}` };
-                this.functions.set(snapshotName, snapshotFunc);
-                return prefix + snapshotName;
+                this.functions.set(normalizedSnapshotName, snapshotFunc);
+                return prefix + normalizedSnapshotName;
             }
 
             if (this.variables.has(norm)) {
