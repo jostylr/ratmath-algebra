@@ -143,6 +143,8 @@ Planned features:
             // Rational Functions
             "RatFunc", "RatFuncNumer", "RatFuncDenom", "RatFuncEval",
             "PartialFrac", "PartialFracSteps",
+            // Sparse Polynomials
+            "PolySparse", "PolySparseEval",
             // Piecewise
             "Step", "UnitStep", "Rect", "Ramp", "Clamp", "Sgn",
             "Chi", "ChiOpen", "ChiLeftOpen", "ChiRightOpen",

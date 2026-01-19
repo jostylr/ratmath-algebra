@@ -554,7 +554,9 @@ export class VariableManager {
             // 1. Function Definition: Name(args) -> body
             // Matches: FuncName(args) -> body
             // FuncName must be generic word or @word to match properly (validation inside handler)
-            const funcDefMatch = trimmed.match(/^(@?[_a-zA-Z][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*->\s*(.+)$/);
+            // IMPORTANT: params must not contain '(' to avoid matching function calls with lambda args
+            // e.g., Map(L, (x,i)->x^2) should NOT match as function definition
+            const funcDefMatch = trimmed.match(/^(@?[_a-zA-Z][a-zA-Z0-9_]*)\s*\(([^()]*)\)\s*->\s*(.+)$/);
             if (funcDefMatch) {
                 const [, funcName, paramStr, body] = funcDefMatch;
                 const rawParams = paramStr.split(",").map(p => p.trim()).filter(p => p);
@@ -745,7 +747,7 @@ export class VariableManager {
                     const normTarget = this.normalizeName(varName.startsWith("@") ? varName.substring(1) : varName);
                     
                     if (result.result.type === "sequence") {
-                        // Store as List Accessor Function
+                        // Capital names: Store as List Accessor Function with L(i) syntax
                         // L(i) -> element
                         // L(0) -> full list
                         // L(-i) -> from end
@@ -836,29 +838,30 @@ export class VariableManager {
                 return result;
             }
 
-            // For sequences, store the last value but show the assignment
+            // For lowercase names, store sequences and objects as raw values (not accessors)
             let valueToStore = result.result;
             let displayValue = result.result;
 
+            // Sequences with lastValue (like a,b,c) store just the last value
+            // But explicit list literals [1,2,3] are stored as raw sequences
             if (result.result && result.result.type === "sequence") {
-                valueToStore = result.result.lastValue;
-                displayValue = result.result;
+                if (result.result.lastValue !== undefined) {
+                    // Comma-separated values - store last value
+                    valueToStore = result.result.lastValue;
+                }
+                // Otherwise store the full sequence as raw value
             }
+            // Objects are stored directly as raw object values
 
             const normalizedVarName = this.normalizeName(varName);
             this.variables.set(normalizedVarName, valueToStore);
 
-            // For sequences, show assignment differently
-            let message;
-            if (result.result && result.result.type === "sequence") {
-                message = `${normalizedVarName} = ${this.formatValue(valueToStore)} (assigned last value of ${this.formatValue(displayValue)})`;
-            } else {
-                message = `${normalizedVarName} = ${this.formatValue(displayValue)}`;
-            }
+            // Format message
+            let message = `${normalizedVarName} = ${this.formatValue(valueToStore)}`;
 
             return {
                 type: "assignment",
-                result: displayValue,
+                result: valueToStore,
                 message: message,
             };
         } catch (error) {
@@ -1078,8 +1081,13 @@ export class VariableManager {
                 const isParamFunction = /^[A-Z]/.test(cleanParamName); // Uppercase = expects Function
                 const isParamValue = /^[a-z]/.test(cleanParamName);     // Lowercase = expects Value
 
-                // CHECK FOR EXPLICIT LAMBDA: "var -> expr"
-                const lambdaMatch = argRaw.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
+                // CHECK FOR EXPLICIT LAMBDA: "var -> expr" or "(var1, var2, ...) -> expr"
+                // Single param: x -> x^2
+                // Multi param: (x, i) -> i*x^2
+                const singleLambdaMatch = argRaw.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
+                const multiLambdaMatch = argRaw.match(/^\(([^)]+)\)\s*->\s*(.+)$/);
+                
+                const lambdaMatch = singleLambdaMatch || multiLambdaMatch;
 
                 if (lambdaMatch) {
                     if (!isParamFunction) {
@@ -1088,14 +1096,21 @@ export class VariableManager {
                     }
 
                     // Create Anonymous Function
-                    const [, lambdaParam, lambdaBody] = lambdaMatch;
+                    const [, lambdaParamsRaw, lambdaBody] = lambdaMatch;
+                    // Parse params - could be single "x" or comma-separated "x, i"
+                    const lambdaParams = lambdaParamsRaw.split(',').map(p => p.trim()).filter(p => p);
+                    
+                    // Freeze the body for static scoping (same as handleFunctionDefinition)
+                    const paramSet = new Set(lambdaParams);
+                    const staticBody = this.freezeExpression(lambdaBody.trim(), paramSet);
+                    
                     // Use namespaced Format: @@Anon@<Timestamp>_<Random>
                     // This satisfies the functionCallRegex logic.
                     const anonName = `@@Anon@${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
                     this.functions.set(anonName, {
-                        params: [lambdaParam.trim()],
-                        body: lambdaBody.trim(),
+                        params: lambdaParams,
+                        body: staticBody,
                         type: 'def',
                         doc: 'Anonymous Lambda'
                     });
@@ -1489,8 +1504,9 @@ export class VariableManager {
             }
 
             let substitutedFunctions = expression;
+            const DEBUG_PROP_CALL = false; // Set to true to debug property calls
 
-            // Property-based function call substitution (P.Der(5) -> resolvedFunc(5))
+            // Property-based function call substitution (P.Der(5) -> resolvedFunc(5), a.list(1) -> listFunc(1))
             // Must happen before regular function call handling
             const propertyCallRegex = /([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
             let propMatch;
@@ -1498,23 +1514,47 @@ export class VariableManager {
                 const targetName = propMatch[1];
                 const propName = propMatch[2];
                 const normalizedTarget = this.normalizeName(targetName);
+                // Don't normalize property name - properties are stored with original case
                 
-                // Check if target has this property with a function reference
+                // Check if target has this property
                 if (this.hasDecoration(normalizedTarget, propName)) {
                     const propValue = this.getDecoration(normalizedTarget, propName);
-                    // If property is a string (function name), substitute it
+                    let funcName = null;
+                    
+                    // If property is a string (function name), use it
                     if (propValue && propValue.type === 'string' && propValue.value) {
-                        const funcName = propValue.value;
+                        funcName = propValue.value;
+                    }
+                    // If property is an internal function reference (for lists/objects)
+                    else if (propValue && typeof propValue === 'string' && this.functions.has(propValue)) {
+                        funcName = propValue;
+                    }
+                    // If property is a sequence (list), create a temporary list accessor
+                    else if (propValue && propValue.type === 'sequence') {
+                        const tempListName = `@@TempList@${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                        // Store with normalized name so function lookup can find it
+                        const normalizedTempName = this.normalizeName(tempListName);
+                        this.functions.set(normalizedTempName, {
+                            type: 'list_accessor',
+                            list: propValue  // Pass the full sequence object, not just values
+                        });
+                        funcName = normalizedTempName;
+                    }
+                    
+                    if (funcName) {
                         // Replace "Target.Prop(" with "funcName("
                         const fullPropertyCall = `${targetName}.${propName}`;
+                        const before = substitutedFunctions;
                         substitutedFunctions = substitutedFunctions.replace(
                             new RegExp(fullPropertyCall.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\(', 'g'),
                             funcName + '('
                         );
+                        if (DEBUG_PROP_CALL) console.log('[PROP_CALL] Substituted:', before, '->', substitutedFunctions);
                         propertyCallRegex.lastIndex = 0; // Reset regex after substitution
                     }
                 }
             }
+            if (DEBUG_PROP_CALL && substitutedFunctions !== expression) console.log('[PROP_CALL] Final:', substitutedFunctions);
 
             // Function Call Substitution
             // Matches: Name(args) including @@Anon@123_456 anonymous function names
@@ -1670,13 +1710,23 @@ export class VariableManager {
                                 // Check if parameter expects a function (uppercase start)
                                 const isParamFunction = /^[A-Z]/.test(cleanParamName);
                                 
-                                const lambdaMatch = arg.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
+                                // Support both single-param (x -> expr) and multi-param ((x, i) -> expr) lambdas
+                                const singleLambdaMatch = arg.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
+                                const multiLambdaMatch = arg.match(/^\(([^)]+)\)\s*->\s*(.+)$/);
+                                const lambdaMatch = singleLambdaMatch || multiLambdaMatch;
+                                
                                 if (lambdaMatch) {
-                                    const [, lParam, lBody] = lambdaMatch;
+                                    const [, lParamsRaw, lBody] = lambdaMatch;
+                                    const lParams = lParamsRaw.split(',').map(p => p.trim()).filter(p => p);
+                                    
+                                    // Freeze the body for static scoping
+                                    const paramSet = new Set(lParams);
+                                    const staticBody = this.freezeExpression(lBody.trim(), paramSet);
+                                    
                                     const anonName = `@@Anon@Lambda_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
                                     this.functions.set(anonName, {
-                                        params: [lParam.trim()],
-                                        body: lBody.trim(),
+                                        params: lParams,
+                                        body: staticBody,
                                         type: 'def',
                                         doc: 'Anonymous Lambda'
                                     });
@@ -1842,23 +1892,113 @@ export class VariableManager {
                     // Match identifier from here (including potential dot notation for property access)
                     const tail = substitutedFunctions.substring(i);
                     // Match identifier with optional .property suffix
-                    const match = tail.match(/^((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))(?:\.([_a-zA-Z][a-zA-Z0-9_]*))?/);
+                    // Match identifier with optional chained .property suffixes (a.obj.m)
+                    const match = tail.match(/^((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))(\.[_a-zA-Z][a-zA-Z0-9_]*)*/);
 
                     if (match) {
+                        const fullMatch = match[0];
                         const token = match[1];
-                        const propertyName = match[2]; // May be undefined if no dot notation
                         
-                        // Check for property access (P.type)
-                        if (propertyName) {
-                            const normalizedTarget = this.normalizeName(token.startsWith("@") ? token.substring(1) : token);
-                            const targetExists = hasVar(token) || this.functions.has(normalizedTarget);
+                        // Check for chained property access (a.obj.m)
+                        if (fullMatch.includes('.')) {
+                            const parts = fullMatch.split('.');
+                            const baseName = parts[0];
+                            const normalizedBase = this.normalizeName(baseName.startsWith("@") ? baseName.substring(1) : baseName);
+                            const baseExists = hasVar(baseName) || this.functions.has(normalizedBase);
                             
-                            if (targetExists && this.hasDecoration(normalizedTarget, propertyName)) {
-                                const propValue = this.getDecoration(normalizedTarget, propertyName);
-                                const s = this.formatValueWithPrefix(propValue);
-                                finalExpr += s;
-                                i += match[0].length; // Skip full match including .property
-                                continue;
+                            if (baseExists && parts.length > 1) {
+                                // Resolve property chain
+                                let currentTarget = normalizedBase;
+                                let currentValue = null; // Track current object value for nested access
+                                let resolved = true;
+                                let finalValue = null;
+                                
+                                // Check if base is an object variable with internal properties
+                                const baseVar = this.variables.get(normalizedBase);
+                                if (baseVar && baseVar.type === 'object' && baseVar.properties) {
+                                    currentValue = baseVar;
+                                }
+                                
+                                for (let pi = 1; pi < parts.length; pi++) {
+                                    const propName = parts[pi];
+                                    let foundInObject = false;
+                                    
+                                    // If we have a current object value with properties Map, access it directly
+                                    if (currentValue && currentValue.type === 'object' && currentValue.properties) {
+                                        if (currentValue.properties.has(propName)) {
+                                            finalValue = currentValue.properties.get(propName);
+                                            currentValue = finalValue; // For further chaining if it's also an object
+                                            foundInObject = true;
+                                            if (finalValue && finalValue.type === 'object') {
+                                                continue;
+                                            }
+                                            // If this is the last property or value is not an object, we're done
+                                            if (pi === parts.length - 1) {
+                                                continue;
+                                            }
+                                            // Not an object but more properties to resolve - check decorations
+                                            currentValue = null;
+                                        }
+                                    }
+                                    
+                                    // If not found in object properties, look up in decorations
+                                    if (!foundInObject) {
+                                        if (this.hasDecoration(currentTarget, propName)) {
+                                            const propValue = this.getDecoration(currentTarget, propName);
+                                            finalValue = propValue;
+                                            
+                                            // If this property is an object with properties, we can chain further
+                                            if (propValue && propValue.type === 'object' && propValue.properties) {
+                                                currentValue = propValue;
+                                                continue;
+                                            }
+                                            // If this property is a string function reference to an object
+                                            if (propValue && propValue.type === 'string' && this.functions.has(propValue.value)) {
+                                                const funcDef = this.functions.get(propValue.value);
+                                                if (funcDef && funcDef.type === 'object_function') {
+                                                    currentTarget = propValue.value;
+                                                    currentValue = null;
+                                                    continue;
+                                                }
+                                            }
+                                            // If not the last property, we need to continue chaining
+                                            if (pi < parts.length - 1) {
+                                                resolved = false;
+                                                break;
+                                            }
+                                        } else {
+                                            resolved = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if (resolved && finalValue !== null) {
+                                    const s = this.formatValueWithPrefix(finalValue);
+                                    finalExpr += s;
+                                    i += fullMatch.length;
+                                    continue;
+                                }
+                            }
+                        }
+                        
+                        // Fall back to single property access for backwards compat
+                        const singleMatch = tail.match(/^((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))(?:\.([_a-zA-Z][a-zA-Z0-9_]*))?/);
+                        if (singleMatch) {
+                            const singleToken = singleMatch[1];
+                            const propertyName = singleMatch[2];
+                            
+                            if (propertyName) {
+                                const normalizedTarget = this.normalizeName(singleToken.startsWith("@") ? singleToken.substring(1) : singleToken);
+                                const targetExists = hasVar(singleToken) || this.functions.has(normalizedTarget);
+                                
+                                if (targetExists && this.hasDecoration(normalizedTarget, propertyName)) {
+                                    const propValue = this.getDecoration(normalizedTarget, propertyName);
+                                    const s = this.formatValueWithPrefix(propValue);
+                                    finalExpr += s;
+                                    i += singleMatch[0].length;
+                                    continue;
+                                }
                             }
                         }
                         
@@ -2039,6 +2179,10 @@ export class VariableManager {
      * Format a value for display
      */
     formatValue(value) {
+        // Handle undefined/null
+        if (value === undefined || value === null) {
+            return "undefined";
+        }
         // Handle string type
         if (value && value.type === "string") {
             // Check if this string is a function reference
@@ -2052,6 +2196,10 @@ export class VariableManager {
                 }
             }
             return `"${value.value}"`;
+        }
+        if (value && value.type === "object") {
+            // Format object as {Object}
+            return "{Object}";
         }
         if (value && value.type === "sequence") {
             // Format sequence as [val1, val2, val3, ...]
@@ -2384,17 +2532,33 @@ export class VariableManager {
     }
 
     /**
+     * Normalize a property name for case-insensitive lookup
+     * Properties are case-insensitive except for first letter which determines type
+     */
+    normalizePropName(propName) {
+        if (!propName) return propName;
+        // Keep first letter case, lowercase the rest for case-insensitive matching
+        return propName[0] + propName.slice(1).toLowerCase();
+    }
+
+    /**
      * Set a decoration property on a variable or function
+     * Property names are case-insensitive but display case is preserved
      * @param {string} name - Variable or function name
      * @param {string} propName - Property name
      * @param {any} value - Property value
      */
     setDecoration(name, propName, value) {
         const normalizedName = this.normalizeName(name);
+        const normalizedProp = this.normalizePropName(propName);
         if (!this.decorations.has(normalizedName)) {
             this.decorations.set(normalizedName, new Map());
         }
-        this.decorations.get(normalizedName).set(propName, value);
+        // Store value with original display name
+        this.decorations.get(normalizedName).set(normalizedProp, { 
+            value: value, 
+            displayName: propName 
+        });
     }
 
     /**
@@ -2405,10 +2569,13 @@ export class VariableManager {
      */
     getDecoration(name, propName) {
         const normalizedName = this.normalizeName(name);
+        const normalizedProp = this.normalizePropName(propName);
         if (!this.decorations.has(normalizedName)) {
             return undefined;
         }
-        return this.decorations.get(normalizedName).get(propName);
+        const entry = this.decorations.get(normalizedName).get(normalizedProp);
+        // Return just the value, not the wrapper
+        return entry?.value;
     }
 
     /**
@@ -2419,10 +2586,11 @@ export class VariableManager {
      */
     hasDecoration(name, propName) {
         const normalizedName = this.normalizeName(name);
+        const normalizedProp = this.normalizePropName(propName);
         if (!this.decorations.has(normalizedName)) {
             return false;
         }
-        return this.decorations.get(normalizedName).has(propName);
+        return this.decorations.get(normalizedName).has(normalizedProp);
     }
 
     /**
@@ -2433,32 +2601,43 @@ export class VariableManager {
      */
     deleteDecoration(name, propName) {
         const normalizedName = this.normalizeName(name);
+        const normalizedProp = this.normalizePropName(propName);
         if (!this.decorations.has(normalizedName)) {
             return false;
         }
-        return this.decorations.get(normalizedName).delete(propName);
+        return this.decorations.get(normalizedName).delete(normalizedProp);
     }
 
     /**
      * Get all decoration properties for a variable or function
+     * Returns a Map with display names as keys
      * @param {string} name - Variable or function name
      * @returns {Map|undefined} - Map of property names to values
      */
     getDecorations(name) {
         const normalizedName = this.normalizeName(name);
-        return this.decorations.get(normalizedName);
+        const rawMap = this.decorations.get(normalizedName);
+        if (!rawMap) return undefined;
+        
+        // Convert to display format
+        const result = new Map();
+        for (const [normalizedKey, entry] of rawMap) {
+            result.set(entry.displayName, entry.value);
+        }
+        return result;
     }
 
     /**
      * Get all decoration property names for a variable or function
      * @param {string} name - Variable or function name
-     * @returns {string[]} - Array of property names
+     * @returns {string[]} - Array of property names (display names)
      */
     getDecorationKeys(name) {
         const normalizedName = this.normalizeName(name);
-        if (!this.decorations.has(normalizedName)) {
+        const rawMap = this.decorations.get(normalizedName);
+        if (!rawMap) {
             return [];
         }
-        return Array.from(this.decorations.get(normalizedName).keys());
+        return Array.from(rawMap.values()).map(entry => entry.displayName);
     }
 }
