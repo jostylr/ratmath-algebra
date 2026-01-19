@@ -1345,6 +1345,30 @@ export class VariableManager {
             // Normalize Scope Chain
             const scopeChain = Array.isArray(localScope) ? localScope : [localScope];
 
+            // Quick check: if expression is a simple variable name containing an oracle, return it directly
+            const trimmed = expression.trim();
+            if (/^@?[a-z_][a-zA-Z0-9_]*$/.test(trimmed)) {
+                const varName = trimmed.startsWith('@') ? trimmed.substring(1) : trimmed;
+                const normalizedName = this.normalizeName(varName);
+                // Check scope chain first
+                for (const scope of scopeChain) {
+                    if (scope.has(normalizedName)) {
+                        const val = scope.get(normalizedName);
+                        if (typeof val === 'function' && val.yes) {
+                            return { type: 'expression', result: val };
+                        }
+                        break;
+                    }
+                }
+                // Check global variables
+                if (this.variables.has(normalizedName)) {
+                    const val = this.variables.get(normalizedName);
+                    if (typeof val === 'function' && val.yes) {
+                        return { type: 'expression', result: val };
+                    }
+                }
+            }
+
             // Check for Lambda Expression (x -> x^2)
             // If expression is a lambda, we register it and return the name
             const lambdaMatch = expression.match(/^\s*([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
@@ -1954,11 +1978,16 @@ export class VariableManager {
                             resultVal = r.result;
                         }
 
-                        // If the function call is the entire expression and returns a string,
+                        // If the function call is the entire expression and returns a string or oracle,
                         // return it directly to avoid re-parsing issues
-                        if (startIndex === 0 && closeParenIndex === substitutedFunctions.length - 1 &&
-                            resultVal && resultVal.type === 'string') {
-                            return { type: "expression", result: resultVal };
+                        if (startIndex === 0 && closeParenIndex === substitutedFunctions.length - 1) {
+                            if (resultVal && resultVal.type === 'string') {
+                                return { type: "expression", result: resultVal };
+                            }
+                            // Return oracles directly (function with yes property)
+                            if (typeof resultVal === 'function' && resultVal.yes) {
+                                return { type: "expression", result: resultVal };
+                            }
                         }
 
                         const resultStr = this.formatValueWithPrefix(resultVal);
@@ -2170,6 +2199,10 @@ export class VariableManager {
                             }
 
                             const val = getVar(token);
+                            // If this is an oracle and it's the entire expression, return it directly
+                            if (typeof val === 'function' && val.yes && finalExpr === '' && i + token.length === intermediateExpr.length) {
+                                return { type: "expression", result: val };
+                            }
                             const s = this.formatValueWithPrefix(val);
                             finalExpr += s;
                             i += token.length;
@@ -2300,6 +2333,11 @@ export class VariableManager {
             return `{${pairs.join(", ")}}`;
         }
 
+        // Handle Oracle (function with yes property)
+        if (typeof value === 'function' && value.yes) {
+            return `[Oracle]`;
+        }
+
         if (value instanceof RationalInterval) {
             return `${this.formatValueWithPrefix(value.low)}:${this.formatValueWithPrefix(value.high)}`;
         }
@@ -2348,6 +2386,10 @@ export class VariableManager {
         if (value && value.type === "object") {
             // Format object as {Object}
             return "{Object}";
+        }
+        // Handle Oracle (function with yes property)
+        if (typeof value === 'function' && value.yes) {
+            return `[Oracle] yes: ${value.yes.toString()}`;
         }
         if (value && value.type === "sequence") {
             // Format sequence as [val1, val2, val3, ...]
