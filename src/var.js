@@ -1360,9 +1360,157 @@ export class VariableManager {
                 return { type: 'expression', result: anonName };
             }
 
-            // Check for Object Literal {a=5, b=c, Der=x->x^2}
+            // Check for Piecewise syntax {{cond ? val, cond2 ? val2, default}}
+            // Must check BEFORE object literal since both use braces
             const trimmedExpr = expression.trim();
-            if (trimmedExpr.startsWith('{') && trimmedExpr.endsWith('}')) {
+            if ((trimmedExpr.startsWith('{{') && trimmedExpr.endsWith('}}')) ||
+                (trimmedExpr.startsWith('{') && trimmedExpr.endsWith('}') && trimmedExpr.includes('?'))) {
+                // Determine if this is piecewise (has ?) or object literal (has =)
+                const inner = trimmedExpr.startsWith('{{') 
+                    ? trimmedExpr.slice(2, -2).trim()
+                    : trimmedExpr.slice(1, -1).trim();
+                
+                // Check if it looks like piecewise (contains ? but first non-nested special char is ?)
+                // vs object literal (contains = as assignment)
+                let isPiecewise = false;
+                let depth = 0;
+                let inString = false;
+                for (let i = 0; i < inner.length; i++) {
+                    const char = inner[i];
+                    if (char === '"') {
+                        let backslashCount = 0;
+                        let j = i - 1;
+                        while (j >= 0 && inner[j] === '\\') { backslashCount++; j--; }
+                        if (backslashCount % 2 === 0) inString = !inString;
+                    }
+                    if (!inString) {
+                        if (char === '(' || char === '[' || char === '{') depth++;
+                        else if (char === ')' || char === ']' || char === '}') depth--;
+                        else if (depth === 0) {
+                            if (char === '?') {
+                                isPiecewise = true;
+                                break;
+                            } else if (char === '=') {
+                                // Check if this = is part of ==, >=, <=, or != (comparison operators)
+                                const prevChar = i > 0 ? inner[i - 1] : '';
+                                const nextChar = i + 1 < inner.length ? inner[i + 1] : '';
+                                if (prevChar === '>' || prevChar === '<' || prevChar === '!' || prevChar === '=' || nextChar === '=') {
+                                    // This is part of a comparison operator, continue
+                                    continue;
+                                }
+                                // Found = that's not ==, >=, <=, !=, so it's object literal
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (isPiecewise) {
+                    // Parse piecewise: condition ? value pairs, last can be just value (default)
+                    const pieces = [];
+                    let defaultValue = null;
+                    
+                    // Split by comma at depth 0
+                    const parts = [];
+                    let current = '';
+                    depth = 0;
+                    inString = false;
+                    for (let i = 0; i < inner.length; i++) {
+                        const char = inner[i];
+                        if (char === '"') {
+                            let backslashCount = 0;
+                            let j = i - 1;
+                            while (j >= 0 && inner[j] === '\\') { backslashCount++; j--; }
+                            if (backslashCount % 2 === 0) inString = !inString;
+                        }
+                        if (!inString) {
+                            if (char === '(' || char === '[' || char === '{') depth++;
+                            else if (char === ')' || char === ']' || char === '}') depth--;
+                        }
+                        if (char === ',' && depth === 0 && !inString) {
+                            parts.push(current.trim());
+                            current = '';
+                        } else {
+                            current += char;
+                        }
+                    }
+                    if (current.trim()) parts.push(current.trim());
+                    
+                    // Parse each part as "condition ? value" or just "value" (default)
+                    for (let i = 0; i < parts.length; i++) {
+                        const part = parts[i];
+                        
+                        // Find ? at depth 0
+                        let qIndex = -1;
+                        depth = 0;
+                        inString = false;
+                        for (let j = 0; j < part.length; j++) {
+                            const char = part[j];
+                            if (char === '"') {
+                                let backslashCount = 0;
+                                let k = j - 1;
+                                while (k >= 0 && part[k] === '\\') { backslashCount++; k--; }
+                                if (backslashCount % 2 === 0) inString = !inString;
+                            }
+                            if (!inString) {
+                                if (char === '(' || char === '[' || char === '{') depth++;
+                                else if (char === ')' || char === ']' || char === '}') depth--;
+                                else if (char === '?' && depth === 0) {
+                                    qIndex = j;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (qIndex === -1) {
+                            // No ?, this is the default value (must be last)
+                            if (i !== parts.length - 1) {
+                                throw new Error(`Piecewise: default value must be last, but found unconditional at position ${i + 1}`);
+                            }
+                            const valResult = this.evaluateExpression(part, scopeChain);
+                            if (valResult.type === 'error') throw new Error(valResult.message);
+                            defaultValue = valResult.result;
+                        } else {
+                            // condition ? value
+                            const condExpr = part.slice(0, qIndex).trim();
+                            const valExpr = part.slice(qIndex + 1).trim();
+                            
+                            const condResult = this.evaluateExpression(condExpr, scopeChain);
+                            if (condResult.type === 'error') throw new Error(`Piecewise condition error: ${condResult.message}`);
+                            
+                            // Check if condition is truthy
+                            const cond = condResult.result;
+                            let isTruthy = false;
+                            if (cond instanceof Integer) {
+                                isTruthy = cond.value !== 0n;
+                            } else if (cond instanceof Rational) {
+                                isTruthy = cond.sign() !== 0;
+                            } else if (typeof cond === 'number') {
+                                isTruthy = cond !== 0;
+                            } else if (typeof cond === 'bigint') {
+                                isTruthy = cond !== 0n;
+                            }
+                            
+                            if (isTruthy) {
+                                // Return this value immediately
+                                const valResult = this.evaluateExpression(valExpr, scopeChain);
+                                if (valResult.type === 'error') throw new Error(valResult.message);
+                                return { type: 'expression', result: valResult.result };
+                            }
+                            // Otherwise continue to next condition
+                        }
+                    }
+                    
+                    // No condition matched
+                    if (defaultValue !== null) {
+                        return { type: 'expression', result: defaultValue };
+                    }
+                    throw new Error("Piecewise: no matching condition and no default value");
+                }
+            }
+            
+            // Check for Object Literal {a=5, b=c, Der=x->x^2}
+            if (trimmedExpr.startsWith('{') && trimmedExpr.endsWith('}') && !trimmedExpr.startsWith('{{')) {
                 const inner = trimmedExpr.slice(1, -1).trim();
                 if (inner.length === 0) {
                     // Empty object

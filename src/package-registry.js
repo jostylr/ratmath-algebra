@@ -88,15 +88,39 @@ Planned features:
     // Oracles package
     oracles: {
         name: "Oracles",
-        description: "Oracle-based computation for real number operations",
+        description: "Oracle-based exact real arithmetic with lazy evaluation",
         requires: [],
-        functions: [],
+        functions: ["Oracle", "OracleAdd", "OracleSub", "OracleMul", "OracleDiv", "OracleNeg", 
+                    "Narrow", "OracleYes", "Sqrt", "NRoot", "CFSqrt2", "CFE", "CFPhi", 
+                    "OracleFromCF", "Convergent"],
         help: `
-Oracles Package - Oracle-Based Computation
+Oracles Package - Exact Real Arithmetic
 
-This package provides oracle-based computation methods for
-exact real arithmetic operations.
-(Currently in development)
+Represents real numbers as "oracles" - functions that can refine
+rational interval bounds to arbitrary precision on demand.
+
+CREATING ORACLES:
+  Oracle(x)              - Create oracle from Rational/RationalInterval
+  Sqrt(x)                - Square root oracle (Newton's method)
+  NRoot(x, n)            - nth root oracle
+  CFSqrt2()              - Oracle for sqrt(2) from continued fraction
+  CFE()                  - Oracle for e from continued fraction
+  CFPhi()                - Oracle for golden ratio
+  OracleFromCF(terms)    - Oracle from CF term array
+
+ARITHMETIC (auto-converts Rational to Oracle):
+  OracleAdd(a, b)        - Add oracles
+  OracleSub(a, b)        - Subtract oracles
+  OracleMul(a, b)        - Multiply oracles  
+  OracleDiv(a, b)        - Divide oracles
+  OracleNeg(a)           - Negate oracle
+
+INSPECTION:
+  OracleYes(oracle)      - Get current yes-interval
+  Narrow(oracle, prec)   - Refine to precision, returns interval
+  Convergent(cf, n)      - nth convergent of CF stream
+
+Note: Narrow returns a Promise. Use with async/await.
 `
     },
 
