@@ -1978,7 +1978,7 @@ export class VariableManager {
                             resultVal = r.result;
                         }
 
-                        // If the function call is the entire expression and returns a string or oracle,
+                        // If the function call is the entire expression and returns a special type,
                         // return it directly to avoid re-parsing issues
                         if (startIndex === 0 && closeParenIndex === substitutedFunctions.length - 1) {
                             if (resultVal && resultVal.type === 'string') {
@@ -1986,6 +1986,10 @@ export class VariableManager {
                             }
                             // Return oracles directly (function with yes property)
                             if (typeof resultVal === 'function' && resultVal.yes) {
+                                return { type: "expression", result: resultVal };
+                            }
+                            // Return Promises directly for async functions
+                            if (resultVal && typeof resultVal.then === 'function') {
                                 return { type: "expression", result: resultVal };
                             }
                         }
@@ -2338,6 +2342,11 @@ export class VariableManager {
             return `[Oracle]`;
         }
 
+        // Handle Promise (async results)
+        if (value && typeof value.then === 'function') {
+            return `[Promise]`;
+        }
+
         if (value instanceof RationalInterval) {
             return `${this.formatValueWithPrefix(value.low)}:${this.formatValueWithPrefix(value.high)}`;
         }
@@ -2390,6 +2399,10 @@ export class VariableManager {
         // Handle Oracle (function with yes property)
         if (typeof value === 'function' && value.yes) {
             return `[Oracle] yes: ${value.yes.toString()}`;
+        }
+        // Handle Promise (async results)
+        if (value && typeof value.then === 'function') {
+            return `[Promise - use await]`;
         }
         if (value && value.type === "sequence") {
             // Format sequence as [val1, val2, val3, ...]
