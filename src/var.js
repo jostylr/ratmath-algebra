@@ -2204,7 +2204,7 @@ export class VariableManager {
 
                             const val = getVar(token);
                             // If this is an oracle and it's the entire expression, return it directly
-                            if (typeof val === 'function' && val.yes && finalExpr === '' && i + token.length === intermediateExpr.length) {
+                            if (typeof val === 'function' && val.yes && finalExpr === '' && i + token.length === substitutedFunctions.length) {
                                 return { type: "expression", result: val };
                             }
                             const s = this.formatValueWithPrefix(val);
