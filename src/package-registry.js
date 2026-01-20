@@ -92,7 +92,7 @@ Planned features:
         requires: [],
         functions: ["Oracle", "OracleAdd", "OracleSub", "OracleMul", "OracleDiv", "OracleNeg", 
                     "Narrow", "OracleYes", "Sqrt", "NRoot", "CFSqrt2", "CFE", "CFPhi", 
-                    "OracleFromCF", "Convergent", "Ask", "Estimate"],
+                    "OracleFromCF", "Convergent", "Ask", "Estimate", "Midpoint", "Mediant"],
         help: `
 Oracles Package - Exact Real Arithmetic
 
@@ -120,9 +120,13 @@ INSPECTION:
   Narrow(oracle, prec)   - Refine to precision, returns interval
   Convergent(cf, n)      - nth convergent of CF stream
   Ask(oracle, interval)  - Returns 1 if oracle in interval, 0 otherwise
-  Estimate(oracle, prec) - Decimal estimate (default prec: 0.01 or _precision)
 
-Note: Narrow, Ask, Estimate return Promises (async).
+ESTIMATION (async - returns Promises):
+  Estimate(oracle, prec) - Terminating decimal in Yes interval
+  Midpoint(oracle, prec) - Exact midpoint of Yes interval as Rational
+  Mediant(oracle, prec)  - Simplest Farey mediant in Yes interval
+
+Note: Narrow, Ask, Estimate, Midpoint, Mediant return Promises.
 `
     },
 

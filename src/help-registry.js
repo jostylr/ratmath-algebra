@@ -88,6 +88,14 @@ OPERATORS:
   !             Factorial
   ( )           Grouping
 
+COMPARISON:
+  < > <= >= == !=   Returns 1 (true) or 0 (false)
+  && ||             Logical AND, OR
+
+PIECEWISE (Case Statement):
+  {{cond ? val, cond2 ? val2, default}}
+  Example: {{x>0 ? 1, x<0 ? -1, 0}}
+
 Type HELP syntax-full for complete syntax reference.
 `,
 
@@ -126,17 +134,38 @@ OPERATORS (precedence high to low):
   **                      Multiplicative power
   * /                     Multiplication, division
   + -                     Addition, subtraction
+  < > <= >= == !=         Comparison (returns 1 or 0)
+  &&                      Logical AND
+  ||                      Logical OR
+
+PIECEWISE / CASE STATEMENT:
+  {{cond ? val, ...}}     Evaluate conditions in order
+  {{x>0 ? 1, 0}}          Returns 1 if x>0, else 0
+  {{x>0 ? 1, x<0 ? -1, 0}} Sign function
+  
+  - Conditions are evaluated left to right
+  - First true condition returns its value
+  - Last value without ? is the default
+  - Works in function definitions: Abs = x -> {{x>=0 ? x, -x}}
+  - Works as standalone expression: {{a>b ? a, b}}
 
 NAMES:
   Variables (values):
     x, myVar, aVar        Start with lowercase letter
     aVar = avar           Case-insensitive after first char
     _precision            Underscore prefix = environment var
+    mylist = [1,2,3]      Lowercase = raw sequence (no accessor)
+    obj = {a=5}           Lowercase = raw object variable
 
   Functions/Lists (callable):
     Sq, MyFunc, Avar      Start with Uppercase letter
     Sq(x) -> x^2          Function definition
-    List = [1, 2, 3]      List/accessor definition
+    List = [1, 2, 3]      Uppercase = List accessor: List(1) → 1
+
+  Property Access:
+    obj.prop              Access property (case-insensitive)
+    obj.Prop = obj.prop   Same property, different display
+    obj.name = 5          Last assignment sets display case
 `,
 
     string: `String Functions - Standard Library
@@ -170,10 +199,23 @@ SPLIT/JOIN:
 
 Attach metadata properties to variables and functions using dot notation.
 
+OBJECT VARIABLES (lowercase name):
+  c = {a=4, b=7}          - Create object: displays {Object}
+  c.a                     - Access property: returns 4
+  c.d = 8                 - Add new property
+  c.e = {n=7}             - Nested objects supported
+  c.e.n                   - Chain access: returns 7
+
 PROPERTY ASSIGNMENT:
   P.type = "poly"         - Set property on variable/function
   x.order = 3             - Numeric properties
   P.Der = x->2*x          - Store function references
+
+CASE-INSENSITIVE ACCESS:
+  obj.aB = 8              - Set property
+  obj.ab                  - Returns 8 (same property)
+  obj.AB                  - Returns 8 (same property)
+  obj.ab = 7              - Overwrites; display now shows "ab"
 
 OBJECT LITERALS:
   P = {a=5, b=10}         - Create object with properties
@@ -204,17 +246,17 @@ FUNCTIONS:
   ClearProps(target)          - Clear all properties
 
 EXAMPLES:
+  c = {a=4, b=7}
+  Info(c)                 → {Object}
+                              a = 4
+                              b = 7
+
   P(x) -> x^2
   P.type = "poly"
   P.degree = 2
   Info(P)                 → P(x) -> x^2
                               type = poly
                               degree = 2
-  
-  Q = {a=5, b=10, _display="custom"}
-  Info(Q)                 → custom
-                              a = 5
-                              b = 10
 `,
 
     trig: `Trigonometric Functions (requires: LOAD reals)
@@ -250,6 +292,188 @@ EXAMPLES:
   Ln(E())             → 1
   Log(100, 10)        → 2
   Exp(Ln(5))          → 5
+`,
+
+    // ArithFuns package help topics
+    polynomial: `Polynomials (requires: LOAD arith-funs)
+
+Create and manipulate polynomials with exact rational coefficients.
+
+CONSTRUCTORS:
+  Poly(coeffs)              - Create polynomial from coefficients (ascending)
+
+EVALUATION:
+  PolyEval(P, x)            - Evaluate P(x) directly
+  PolyHorner(P, x)          - Evaluate using Horner's method
+
+ARITHMETIC:
+  PolyAdd(P, Q)             - Add polynomials
+  PolySub(P, Q)             - Subtract: P - Q
+  PolyMul(P, Q)             - Multiply polynomials
+  PolyScale(P, c)           - Multiply by scalar: c·P
+  PolyDer(P)                - First derivative
+  PolyInt(P)                - Indefinite integral
+
+DIVISION:
+  SynthDiv(P, c)            - Synthetic division by (x - c)
+  PolyRebase(P, a)          - Taylor expansion at x = a
+
+EXAMPLES:
+  P := Poly({1, 2, 3})      # 1 + 2x + 3x²
+  PolyEval(P, 2)            → 17
+  PolyDer(P)                → Poly({2, 6})  # 2 + 6x
+`,
+
+    "synth-div": `Synthetic Division (requires: LOAD arith-funs)
+
+Efficient polynomial division by linear factors (x - c).
+
+FUNCTIONS:
+  SynthDiv(P, c)            - Divide P by (x - c), return {quotient, remainder}
+  SynthDivPoly(P, c)        - Return just the quotient polynomial
+  SynthDivRem(P, c)         - Return just the remainder (= P(c))
+
+TAYLOR POLYNOMIAL (REBASING):
+  PolyRebase(P, a)          - Express P(x) as polynomial in (x - a)
+
+EXAMPLES:
+  P := Poly({-6, 11, -6, 1})     # x³ - 6x² + 11x - 6
+  SynthDiv(P, 1)                 → {quotient: Poly(...), remainder: 0}
+  SynthDivRem(P, 2)              → 0 (x=2 is a root)
+`,
+
+    "number-theory": `Number Theory (requires: LOAD arith-funs)
+
+Integer and number-theoretic functions.
+
+DIVISIBILITY:
+  Gcd(a, b, ...)            - Greatest common divisor
+  Lcm(a, b, ...)            - Least common multiple
+  ExtGcd(a, b)              - Extended Euclidean: {gcd, x, y}
+  Mod(a, m)                 - a mod m (always ≥ 0)
+
+PRIMES:
+  IsPrime(n)                - Primality test (returns 0 or 1)
+  NextPrime(n)              - Smallest prime > n
+  Factor(n)                 - Prime factorization
+  Divisors(n)               - All divisors of n
+
+MODULAR:
+  ModPow(base, exp, m)      - base^exp mod m (efficient)
+  ModInv(a, m)              - Modular inverse (a⁻¹ mod m)
+  EulerPhi(n)               - Euler's totient φ(n)
+
+COMBINATORICS:
+  Factorial(n)              - n!
+  Binomial(n, k)            - C(n,k) = n choose k
+  Fibonacci(n)              - nth Fibonacci number
+
+EXAMPLES:
+  Gcd(48, 18)               → 6
+  Factor(60)                → {2, 2, 3, 5}
+  Binomial(10, 3)           → 120
+`,
+
+    piecewise: `Piecewise Functions (requires: LOAD arith-funs)
+
+Define and evaluate piecewise and step functions.
+
+STEP FUNCTIONS:
+  Step(x)                   - Heaviside: 0 if x < 0, 1 if x ≥ 0
+  UnitStep(x, a)            - Step at a: 0 if x < a, 1 if x ≥ a
+  Rect(x, a, b)             - Rectangle: 1 if a ≤ x ≤ b
+  Ramp(x)                   - Ramp: max(0, x)
+
+UTILITY:
+  Clamp(x, lo, hi)          - Clamp x to [lo, hi]
+  Sgn(x)                    - Sign function: -1, 0, or 1
+
+INDICATORS:
+  Chi(x, a, b)              - χ[a,b]: 1 if a ≤ x ≤ b
+  ChiOpen(x, a, b)          - χ(a,b): 1 if a < x < b
+
+EXAMPLES:
+  Step(-2)                  → 0
+  Step(3)                   → 1
+  Rect(1.5, 1, 2)           → 1
+  Clamp(5, 0, 3)            → 3
+
+INLINE PIECEWISE SYNTAX:
+  {{cond ? val, cond2 ? val2, default}}
+  Abs = x -> {{x>=0 ? x, -x}}
+  Sgn2 = x -> {{x>0 ? 1, x<0 ? -1, 0}}
+`,
+
+    oracles: `Oracles - Computable Real Numbers (requires: LOAD oracles)
+
+Oracles represent real numbers that can be computed to arbitrary precision.
+They are functions that answer "yes/no" questions about intervals.
+
+CREATING ORACLES:
+  c = Oracle(...)         - Create from a computation
+  Functions may return oracles for transcendental results
+
+ARITHMETIC:
+  Oracles support arithmetic operations:
+  c + c                   - Addition
+  2 * c                   - Scalar multiplication
+  c * 2                   - Multiplication by number
+  c - 1                   - Subtraction
+  -c                      - Negation
+
+EVALUATION:
+  Estimate(c, n)          - Compute c to n decimal places
+  Compare(a, b)           - Compare two oracles
+
+DISPLAY:
+  c                       → [Oracle] yes: <interval>
+  The "yes" interval shows the current known bounds.
+
+PROPERTIES:
+  Oracle functions have a .yes property containing
+  a rational interval that the value is known to lie in.
+
+EXAMPLES:
+  LOAD oracles
+  c = Sqrt(2)             # Create oracle for √2
+  c + c                   # Oracle for 2√2
+  Estimate(c, 10)         # Compute to 10 decimal places
+`,
+
+    variables: `Variable and Function Naming - Capitalization Rules
+
+RatMath uses the first letter's case to determine behavior:
+
+LOWERCASE (values/data):
+  x = 5                   - Store value
+  mylist = [1, 2, 3]      - Store raw sequence (not callable)
+  obj = {a=5, b=7}        - Store raw object
+  obj.prop                - Access: returns 5
+
+UPPERCASE (callable/functions):
+  Sq(x) -> x^2            - Define function
+  List = [1, 2, 3]        - Create list accessor
+  List(1)                 - Returns 1 (1-indexed access)
+  Obj = {a=5}             - Create object function
+
+CASE SENSITIVITY:
+  Variable names:         Case-insensitive after first letter
+    myVar = myvar = MYVAR (all same if first letter matches case)
+  Property names:         Fully case-insensitive
+    obj.Prop = obj.prop = obj.PROP (all same property)
+
+DISPLAY CASE:
+  The last assignment determines how names are displayed:
+    obj.aB = 5            # Info shows: aB = 5
+    obj.ab = 7            # Info now shows: ab = 7
+
+EXAMPLES:
+  L = [10, 20, 30]        # List accessor
+  L(2)                    → 20
+  
+  data = [10, 20, 30]     # Raw sequence
+  data                    → [10, 20, 30]
+  LEN(data)               → 3
 `,
 };
 
@@ -331,6 +555,7 @@ STDLIB (always available):
   HELP list         - Lists, sequences, higher-order functions
   HELP string       - String manipulation functions
   HELP objects      - Property decoration system
+  HELP variables    - Naming rules and capitalization
 
 SYNTAX:
   HELP syntax       - Quick syntax reference
@@ -339,6 +564,15 @@ SYNTAX:
 REALS (after LOAD reals):
   HELP trig         - Trigonometric functions
   HELP exp          - Exponential and logarithm
+
+ORACLES (after LOAD oracles):
+  HELP oracles      - Computable real numbers
+
+ARITH-FUNS (after LOAD arith-funs):
+  HELP polynomial     - Polynomial operations
+  HELP synth-div      - Synthetic division details
+  HELP number-theory  - Number-theoretic functions
+  HELP piecewise      - Piecewise and step functions
 
 PACKAGES:
   HELP packages     - List available packages to load

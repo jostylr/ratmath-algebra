@@ -121,6 +121,101 @@ export class VariableManager {
     }
 
     /**
+     * Try to evaluate oracle arithmetic expressions like c+c, 2*c, c*2, etc.
+     * Returns the result oracle if successful, null if not an oracle expression.
+     * @param {string} expr - Expression to evaluate
+     * @param {Array} scopeChain - Scope chain for variable lookup
+     * @returns {any|null} - Result oracle or null
+     */
+    tryOracleArithmetic(expr, scopeChain = []) {
+        // Helper to get variable value (checking scopes then globals)
+        const getVar = (name) => {
+            const normalized = this.normalizeName(name.startsWith('@') ? name.substring(1) : name);
+            for (const scope of scopeChain) {
+                if (scope.has(normalized)) return scope.get(normalized);
+            }
+            if (this.variables.has(normalized)) return this.variables.get(normalized);
+            return undefined;
+        };
+
+        // Check if value is an oracle
+        const isOracle = (val) => typeof val === 'function' && val.yes;
+
+        // Try to parse value - could be variable name or number
+        const parseValue = (token) => {
+            token = token.trim();
+            if (!token) return null;
+            
+            // Check if it's a variable
+            if (/^@?[a-zA-Z_][a-zA-Z0-9_]*$/.test(token)) {
+                const val = getVar(token);
+                if (val !== undefined) return val;
+            }
+            
+            // Try to parse as number
+            const num = parseFloat(token);
+            if (!isNaN(num)) return num;
+            
+            return null;
+        };
+
+        // Match simple binary expressions: a OP b
+        // Operators: +, -, *, /
+        const binaryMatch = expr.match(/^([^+\-*/]+)([+\-*/])([^+\-*/]+)$/);
+        if (binaryMatch) {
+            const [, leftStr, op, rightStr] = binaryMatch;
+            const left = parseValue(leftStr);
+            const right = parseValue(rightStr);
+            
+            if (left === null || right === null) return null;
+            
+            // At least one must be an oracle
+            if (!isOracle(left) && !isOracle(right)) return null;
+            
+            // Both are oracles or one is oracle and one is number
+            // Use the oracle's arithmetic methods
+            let oracle = isOracle(left) ? left : right;
+            let other = isOracle(left) ? right : left;
+            let leftIsOracle = isOracle(left);
+            
+            // If the non-oracle is a number, we need to convert it
+            // The oracle's methods handle this conversion
+            switch (op) {
+                case '+':
+                    return oracle.add(other);
+                case '-':
+                    if (leftIsOracle) {
+                        return oracle.subtract(other);
+                    } else {
+                        // other - oracle = -(oracle - other)
+                        return oracle.subtract(other).negate();
+                    }
+                case '*':
+                    return oracle.multiply(other);
+                case '/':
+                    if (leftIsOracle) {
+                        return oracle.divide(other);
+                    } else {
+                        // other / oracle - need reciprocal, not directly supported
+                        // Fall through to normal parsing
+                        return null;
+                    }
+            }
+        }
+
+        // Match unary negation: -a
+        const unaryMatch = expr.match(/^-([a-zA-Z_@][a-zA-Z0-9_]*)$/);
+        if (unaryMatch) {
+            const val = parseValue(unaryMatch[1]);
+            if (val && isOracle(val)) {
+                return val.negate();
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Define a function with strict case validation
      * @param {string} name - Function name (must start with Uppercase or @Uppercase)
      * @param {string[]} params - List of parameter names
@@ -854,6 +949,17 @@ export class VariableManager {
             // Objects are stored directly as raw object values
 
             const normalizedVarName = this.normalizeName(varName);
+
+            // Handle Promise results - return async assignment that caller can await
+            if (valueToStore && typeof valueToStore.then === 'function') {
+                return {
+                    type: "async_assignment",
+                    varName: normalizedVarName,
+                    promise: valueToStore,
+                    variableManager: this
+                };
+            }
+
             this.variables.set(normalizedVarName, valueToStore);
 
             // Format message
@@ -1347,7 +1453,7 @@ export class VariableManager {
 
             // Quick check: if expression is a simple variable name containing an oracle, return it directly
             const trimmed = expression.trim();
-            if (/^@?[a-z_][a-zA-Z0-9_]*$/.test(trimmed)) {
+            if (/^@?[a-z_][a-zA-Z0-9_]*$/i.test(trimmed)) {
                 const varName = trimmed.startsWith('@') ? trimmed.substring(1) : trimmed;
                 const normalizedName = this.normalizeName(varName);
                 // Check scope chain first
@@ -1367,6 +1473,13 @@ export class VariableManager {
                         return { type: 'expression', result: val };
                     }
                 }
+            }
+
+            // Oracle arithmetic handling: detect expressions with oracle variables and arithmetic operators
+            // This handles cases like c+c, 2*c, c*2, c+1, etc.
+            const oracleArithResult = this.tryOracleArithmetic(trimmed, scopeChain);
+            if (oracleArithResult !== null) {
+                return { type: 'expression', result: oracleArithResult };
             }
 
             // Check for Lambda Expression (x -> x^2)
