@@ -39,24 +39,24 @@ export class VariableManager {
      */
     normalizeName(name) {
         if (!name) return name;
-        
+
         // Internal @@Anon@ names should not be normalized - they're system-generated
         if (name.startsWith("@@Anon@")) {
             return name;
         }
-        
+
         // Handle @@ module prefix: @@Module@Name
         const moduleMatch = name.match(/^(@@[a-zA-Z0-9_]+@)(.+)$/);
         if (moduleMatch) {
             const [, prefix, rest] = moduleMatch;
             return prefix.toUpperCase() + this.normalizeName(rest);
         }
-        
+
         // Handle @ prefix (strip it for normalization, add back)
         if (name.startsWith("@") && !name.startsWith("@@")) {
             return "@" + this.normalizeName(name.substring(1));
         }
-        
+
         // Underscore prefix: second character determines case
         // _Fun → _FUN (uppercase), _var → _var (lowercase)
         if (name.startsWith("_") && name.length > 1) {
@@ -67,7 +67,7 @@ export class VariableManager {
                 return "_" + name.substring(1).toLowerCase();
             }
         }
-        
+
         // First char determines case: lowercase → all lower, Uppercase → ALL UPPER
         const firstChar = name.charAt(0);
         if (firstChar >= 'a' && firstChar <= 'z') {
@@ -75,7 +75,7 @@ export class VariableManager {
         } else if (firstChar >= 'A' && firstChar <= 'Z') {
             return name.toUpperCase();
         }
-        
+
         return name;
     }
 
@@ -145,17 +145,17 @@ export class VariableManager {
         const parseValue = (token) => {
             token = token.trim();
             if (!token) return null;
-            
+
             // Check if it's a variable
             if (/^@?[a-zA-Z_][a-zA-Z0-9_]*$/.test(token)) {
                 const val = getVar(token);
                 if (val !== undefined) return val;
             }
-            
+
             // Try to parse as number
             const num = parseFloat(token);
             if (!isNaN(num)) return num;
-            
+
             return null;
         };
 
@@ -166,18 +166,18 @@ export class VariableManager {
             const [, leftStr, op, rightStr] = binaryMatch;
             const left = parseValue(leftStr);
             const right = parseValue(rightStr);
-            
+
             if (left === null || right === null) return null;
-            
+
             // At least one must be an oracle
             if (!isOracle(left) && !isOracle(right)) return null;
-            
+
             // Both are oracles or one is oracle and one is number
             // Use the oracle's arithmetic methods
             let oracle = isOracle(left) ? left : right;
             let other = isOracle(left) ? right : left;
             let leftIsOracle = isOracle(left);
-            
+
             // If the non-oracle is a number, we need to convert it
             // The oracle's methods handle this conversion
             switch (op) {
@@ -288,12 +288,12 @@ export class VariableManager {
     getHelp(name) {
         if (name) {
             const lower = name.toLowerCase();
-            
+
             // Check for "packages" keyword
             if (lower === "packages") {
                 return getPackagesHelpText();
             }
-            
+
             // Check for "topics" keyword - list all help topics
             if (lower === "topics") {
                 return getHelpTopicsText();
@@ -461,7 +461,7 @@ export class VariableManager {
         // Uses the valid characters for this specific base
         // Also captures uncertainty notation like 1.23[45:67] to avoid misidentifying parts of it
         const numberPattern = new RegExp(
-            `\\b(-?[${validChars}0-9a-zA-Z]+(?:\\.[${validChars}0-9a-zA-Z]*)?(?:\\.\\.[${validChars}0-9a-zA-Z]+(?:\\/[${validChars}0-9a-zA-Z]+)?)?(?:\\/[${validChars}0-9a-zA-Z]+)?(?:\\_\\^-?[${validChars}0-9a-zA-Z]+)?)(?:\\[([^\\]]+)\\](?:[Ee][+-]?[${validChars}0-9a-zA-Z]+|\\_\\^-?[${validChars}0-9a-zA-Z]+)?|\\b(?!\\s*\\[))`,
+            `\\b(?:-?0z\\[\\d+\\])?(-?[${validChars}0-9a-zA-Z]+(?:\\.[${validChars}0-9a-zA-Z]*)?(?:\\.\\.[${validChars}0-9a-zA-Z]+(?:\\/[${validChars}0-9a-zA-Z]+)?)?(?:\\/[${validChars}0-9a-zA-Z]+)?(?:\\_\\^-?[${validChars}0-9a-zA-Z]+)?)(?:\\[([^\\]]+)\\](?:[Ee][+-]?[${validChars}0-9a-zA-Z]+|\\_\\^-?[${validChars}0-9a-zA-Z]+)?|\\b(?!\\s*\\[))`,
             "g",
         );
 
@@ -613,8 +613,8 @@ export class VariableManager {
                     return isNeg ? (-val).toString() : val.toString();
                 };
 
-                // Helper to format with 0d prefix handling negatives
-                const toPrefixed0d = (s) => s.startsWith("-") ? `-0d${s.substring(1)}` : `0d${s}`;
+                // Helper to format with 0z[10] prefix handling negatives
+                const toPrefixedDecimal = (s) => s.startsWith("-") ? `-0z[10]${s.substring(1)}` : `0z[10]${s}`;
 
                 // Check for Scientific Notation _^
                 if (match.includes("_^")) {
@@ -622,13 +622,13 @@ export class VariableManager {
                     const baseValStr = parseToRational(basePart);
                     const expValStr = parseToRational(expPart);
                     // Construct expression: (Base) * (SystemBase) ^ (Exp)
-                    return `(${toPrefixed0d(baseValStr)}) * (${toPrefixed0d(this.inputBase.base.toString())}) ^ (${toPrefixed0d(expValStr)})`;
+                    return `(${toPrefixedDecimal(baseValStr)}) * (${toPrefixedDecimal(this.inputBase.base.toString())}) ^ (${toPrefixedDecimal(expValStr)})`;
                 }
 
                 // Standard Number
                 const valStr = parseToRational(match);
-                // Return with 0d prefix to strip context
-                return toPrefixed0d(valStr);
+                // Return with 0z[10] prefix to strip context
+                return toPrefixedDecimal(valStr);
 
             } catch (error) {
                 // If conversion fails for any part, return as-is
@@ -753,11 +753,11 @@ export class VariableManager {
 
                     if (isDigit) {
                         // Ambiguous! Function vs Digit.
-                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for function or explicit base prefix (e.g. 0D${name} or 0x${name}) for number.`);
+                        throw new Error(`Ambiguous reference '${name}'. Use @${name} for function or explicit base prefix (e.g. 0z[10]${name} or 0x${name}) for number.`);
                     }
 
                     const f = this.functions.get(normalizedName);
-                    
+
                     // Check for _display property for custom display
                     const displayProp = this.getDecoration(normalizedName, "_display");
                     if (displayProp) {
@@ -782,7 +782,7 @@ export class VariableManager {
                             message: displayStr
                         };
                     }
-                    
+
                     // Default display
                     return {
                         type: "function_display",
@@ -840,7 +840,7 @@ export class VariableManager {
                 const result = this.evaluateExpression(expression);
                 if (result.type !== "error" && result.result) {
                     const normTarget = this.normalizeName(varName.startsWith("@") ? varName.substring(1) : varName);
-                    
+
                     if (result.result.type === "sequence") {
                         // Capital names: Store as List Accessor Function with L(i) syntax
                         // L(i) -> element
@@ -859,17 +859,17 @@ export class VariableManager {
                             message: `List Accessor ${normTarget} defined. ${normTarget}(i) to access elements.`
                         };
                     }
-                    
+
                     if (result.result.type === "object") {
                         // Object assignment: P = {a=5, b=10, _eval=x->...}
                         // Create an "object" function that stores properties
                         const obj = result.result;
-                        
+
                         // Check for special properties
                         const hasEval = obj.properties.has("_eval");
                         const hasDisplay = obj.properties.has("_display");
                         const hasDefinition = obj.properties.has("_definition");
-                        
+
                         // Create function definition based on _eval or default identity
                         if (hasEval) {
                             const evalFunc = obj.properties.get("_eval");
@@ -900,12 +900,12 @@ export class VariableManager {
                                 doc: `Object ${normTarget}`
                             });
                         }
-                        
+
                         // Copy all properties as decorations
                         for (const [key, value] of obj.properties) {
                             this.setDecoration(normTarget, key, value);
                         }
-                        
+
                         const propCount = obj.properties.size;
                         return {
                             type: "function",
@@ -1012,7 +1012,7 @@ export class VariableManager {
 
             // Return the formatted value as a string for better display
             const formattedValue = this.formatValue(valueToStore);
-            
+
             return {
                 type: "property_assignment",
                 result: formattedValue,
@@ -1070,7 +1070,7 @@ export class VariableManager {
         }
 
         // STATIC SCOPING & BASE SAFETY
-        // 1. Numbers: Convert to 0d decimal literal to make them base-independent
+        // 1. Numbers: Convert to 0z[10] decimal literal to make them base-independent
         // 2. Variables: If not in params and not underscore prefixed, capture current value (freeze)
         // 3. Defaults: Freeze default values too
 
@@ -1192,7 +1192,7 @@ export class VariableManager {
                 // Multi param: (x, i) -> i*x^2
                 const singleLambdaMatch = argRaw.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
                 const multiLambdaMatch = argRaw.match(/^\(([^)]+)\)\s*->\s*(.+)$/);
-                
+
                 const lambdaMatch = singleLambdaMatch || multiLambdaMatch;
 
                 if (lambdaMatch) {
@@ -1205,11 +1205,11 @@ export class VariableManager {
                     const [, lambdaParamsRaw, lambdaBody] = lambdaMatch;
                     // Parse params - could be single "x" or comma-separated "x, i"
                     const lambdaParams = lambdaParamsRaw.split(',').map(p => p.trim()).filter(p => p);
-                    
+
                     // Freeze the body for static scoping (same as handleFunctionDefinition)
                     const paramSet = new Set(lambdaParams);
                     const staticBody = this.freezeExpression(lambdaBody.trim(), paramSet);
-                    
+
                     // Use namespaced Format: @@Anon@<Timestamp>_<Random>
                     // This satisfies the functionCallRegex logic.
                     const anonName = `@@Anon@${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -1503,10 +1503,10 @@ export class VariableManager {
             if ((trimmedExpr.startsWith('{{') && trimmedExpr.endsWith('}}')) ||
                 (trimmedExpr.startsWith('{') && trimmedExpr.endsWith('}') && trimmedExpr.includes('?'))) {
                 // Determine if this is piecewise (has ?) or object literal (has =)
-                const inner = trimmedExpr.startsWith('{{') 
+                const inner = trimmedExpr.startsWith('{{')
                     ? trimmedExpr.slice(2, -2).trim()
                     : trimmedExpr.slice(1, -1).trim();
-                
+
                 // Check if it looks like piecewise (contains ? but first non-nested special char is ?)
                 // vs object literal (contains = as assignment)
                 let isPiecewise = false;
@@ -1541,12 +1541,12 @@ export class VariableManager {
                         }
                     }
                 }
-                
+
                 if (isPiecewise) {
                     // Parse piecewise: condition ? value pairs, last can be just value (default)
                     const pieces = [];
                     let defaultValue = null;
-                    
+
                     // Split by comma at depth 0
                     const parts = [];
                     let current = '';
@@ -1572,11 +1572,11 @@ export class VariableManager {
                         }
                     }
                     if (current.trim()) parts.push(current.trim());
-                    
+
                     // Parse each part as "condition ? value" or just "value" (default)
                     for (let i = 0; i < parts.length; i++) {
                         const part = parts[i];
-                        
+
                         // Find ? at depth 0
                         let qIndex = -1;
                         depth = 0;
@@ -1598,7 +1598,7 @@ export class VariableManager {
                                 }
                             }
                         }
-                        
+
                         if (qIndex === -1) {
                             // No ?, this is the default value (must be last)
                             if (i !== parts.length - 1) {
@@ -1611,10 +1611,10 @@ export class VariableManager {
                             // condition ? value
                             const condExpr = part.slice(0, qIndex).trim();
                             const valExpr = part.slice(qIndex + 1).trim();
-                            
+
                             const condResult = this.evaluateExpression(condExpr, scopeChain);
                             if (condResult.type === 'error') throw new Error(`Piecewise condition error: ${condResult.message}`);
-                            
+
                             // Check if condition is truthy
                             const cond = condResult.result;
                             let isTruthy = false;
@@ -1627,7 +1627,7 @@ export class VariableManager {
                             } else if (typeof cond === 'bigint') {
                                 isTruthy = cond !== 0n;
                             }
-                            
+
                             if (isTruthy) {
                                 // Return this value immediately
                                 const valResult = this.evaluateExpression(valExpr, scopeChain);
@@ -1637,7 +1637,7 @@ export class VariableManager {
                             // Otherwise continue to next condition
                         }
                     }
-                    
+
                     // No condition matched
                     if (defaultValue !== null) {
                         return { type: 'expression', result: defaultValue };
@@ -1645,7 +1645,7 @@ export class VariableManager {
                     throw new Error("Piecewise: no matching condition and no default value");
                 }
             }
-            
+
             // Check for Object Literal {a=5, b=c, Der=x->x^2}
             if (trimmedExpr.startsWith('{') && trimmedExpr.endsWith('}') && !trimmedExpr.startsWith('{{')) {
                 const inner = trimmedExpr.slice(1, -1).trim();
@@ -1653,13 +1653,13 @@ export class VariableManager {
                     // Empty object
                     return { type: 'expression', result: { type: 'object', properties: new Map() } };
                 }
-                
+
                 // Parse comma-separated key=value pairs, respecting nested brackets/parens
                 const pairs = [];
                 let current = '';
                 let depth = 0;
                 let inString = false;
-                
+
                 for (let i = 0; i < inner.length; i++) {
                     const char = inner[i];
                     if (char === '"') {
@@ -1680,7 +1680,7 @@ export class VariableManager {
                     }
                 }
                 if (current.trim()) pairs.push(current.trim());
-                
+
                 // Parse each pair as key=value
                 const properties = new Map();
                 for (const pair of pairs) {
@@ -1705,14 +1705,14 @@ export class VariableManager {
                             }
                         }
                     }
-                    
+
                     if (eqIndex === -1) {
                         throw new Error(`Invalid object literal: missing '=' in '${pair}'`);
                     }
-                    
+
                     const key = pair.slice(0, eqIndex).trim();
                     const valueExpr = pair.slice(eqIndex + 1).trim();
-                    
+
                     // Evaluate the value expression
                     const valueResult = this.evaluateExpression(valueExpr, scopeChain);
                     if (valueResult.type === 'error') {
@@ -1720,7 +1720,7 @@ export class VariableManager {
                     }
                     properties.set(key, valueResult.result);
                 }
-                
+
                 return { type: 'expression', result: { type: 'object', properties } };
             }
 
@@ -1765,7 +1765,7 @@ export class VariableManager {
                 if (upperCommand === "HEX" || upperCommand === "0X") tempBase = BaseSystem.HEXADECIMAL;
                 else if (upperCommand === "BIN" || upperCommand === "0B") tempBase = BaseSystem.BINARY;
                 else if (upperCommand === "OCT" || upperCommand === "0O") tempBase = BaseSystem.OCTAL;
-                else if (upperCommand === "DEC" || command === "0d") tempBase = BaseSystem.DECIMAL;
+                else if (upperCommand === "DEC" || command === "0z[10]") tempBase = BaseSystem.DECIMAL;
                 else if (command.startsWith("BASE")) {
                     const match = command.match(/^BASE(\d+)$/);
                     if (match) {
@@ -1800,12 +1800,12 @@ export class VariableManager {
                 const propName = propMatch[2];
                 const normalizedTarget = this.normalizeName(targetName);
                 // Don't normalize property name - properties are stored with original case
-                
+
                 // Check if target has this property
                 if (this.hasDecoration(normalizedTarget, propName)) {
                     const propValue = this.getDecoration(normalizedTarget, propName);
                     let funcName = null;
-                    
+
                     // If property is a string (function name), use it
                     if (propValue && propValue.type === 'string' && propValue.value) {
                         funcName = propValue.value;
@@ -1825,7 +1825,7 @@ export class VariableManager {
                         });
                         funcName = normalizedTempName;
                     }
-                    
+
                     if (funcName) {
                         // Replace "Target.Prop(" with "funcName("
                         const fullPropertyCall = `${targetName}.${propName}`;
@@ -1994,20 +1994,20 @@ export class VariableManager {
                                 const cleanParamName = paramName.replace(/\?$/, '');
                                 // Check if parameter expects a function (uppercase start)
                                 const isParamFunction = /^[A-Z]/.test(cleanParamName);
-                                
+
                                 // Support both single-param (x -> expr) and multi-param ((x, i) -> expr) lambdas
                                 const singleLambdaMatch = arg.match(/^([a-zA-Z][a-zA-Z0-9_]*)\s*->\s*(.+)$/);
                                 const multiLambdaMatch = arg.match(/^\(([^)]+)\)\s*->\s*(.+)$/);
                                 const lambdaMatch = singleLambdaMatch || multiLambdaMatch;
-                                
+
                                 if (lambdaMatch) {
                                     const [, lParamsRaw, lBody] = lambdaMatch;
                                     const lParams = lParamsRaw.split(',').map(p => p.trim()).filter(p => p);
-                                    
+
                                     // Freeze the body for static scoping
                                     const paramSet = new Set(lParams);
                                     const staticBody = this.freezeExpression(lBody.trim(), paramSet);
-                                    
+
                                     const anonName = `@@Anon@Lambda_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
                                     this.functions.set(anonName, {
                                         params: lParams,
@@ -2192,31 +2192,31 @@ export class VariableManager {
                     if (match) {
                         const fullMatch = match[0];
                         const token = match[1];
-                        
+
                         // Check for chained property access (a.obj.m)
                         if (fullMatch.includes('.')) {
                             const parts = fullMatch.split('.');
                             const baseName = parts[0];
                             const normalizedBase = this.normalizeName(baseName.startsWith("@") ? baseName.substring(1) : baseName);
                             const baseExists = hasVar(baseName) || this.functions.has(normalizedBase);
-                            
+
                             if (baseExists && parts.length > 1) {
                                 // Resolve property chain
                                 let currentTarget = normalizedBase;
                                 let currentValue = null; // Track current object value for nested access
                                 let resolved = true;
                                 let finalValue = null;
-                                
+
                                 // Check if base is an object variable with internal properties
                                 const baseVar = this.variables.get(normalizedBase);
                                 if (baseVar && baseVar.type === 'object' && baseVar.properties) {
                                     currentValue = baseVar;
                                 }
-                                
+
                                 for (let pi = 1; pi < parts.length; pi++) {
                                     const propName = parts[pi];
                                     let foundInObject = false;
-                                    
+
                                     // If we have a current object value with properties Map, access it directly
                                     if (currentValue && currentValue.type === 'object' && currentValue.properties) {
                                         if (currentValue.properties.has(propName)) {
@@ -2234,13 +2234,13 @@ export class VariableManager {
                                             currentValue = null;
                                         }
                                     }
-                                    
+
                                     // If not found in object properties, look up in decorations
                                     if (!foundInObject) {
                                         if (this.hasDecoration(currentTarget, propName)) {
                                             const propValue = this.getDecoration(currentTarget, propName);
                                             finalValue = propValue;
-                                            
+
                                             // If this property is an object with properties, we can chain further
                                             if (propValue && propValue.type === 'object' && propValue.properties) {
                                                 currentValue = propValue;
@@ -2266,7 +2266,7 @@ export class VariableManager {
                                         }
                                     }
                                 }
-                                
+
                                 if (resolved && finalValue !== null) {
                                     const s = this.formatValueWithPrefix(finalValue);
                                     finalExpr += s;
@@ -2275,17 +2275,17 @@ export class VariableManager {
                                 }
                             }
                         }
-                        
+
                         // Fall back to single property access for backwards compat
                         const singleMatch = tail.match(/^((?:@@[a-zA-Z0-9_]+@)?(?:@?[_a-zA-Z][a-zA-Z0-9_]*))(?:\.([_a-zA-Z][a-zA-Z0-9_]*))?/);
                         if (singleMatch) {
                             const singleToken = singleMatch[1];
                             const propertyName = singleMatch[2];
-                            
+
                             if (propertyName) {
                                 const normalizedTarget = this.normalizeName(singleToken.startsWith("@") ? singleToken.substring(1) : singleToken);
                                 const targetExists = hasVar(singleToken) || this.functions.has(normalizedTarget);
-                                
+
                                 if (targetExists && this.hasDecoration(normalizedTarget, propertyName)) {
                                     const propValue = this.getDecoration(normalizedTarget, propertyName);
                                     const s = this.formatValueWithPrefix(propValue);
@@ -2295,7 +2295,7 @@ export class VariableManager {
                                 }
                             }
                         }
-                        
+
                         // Check if known variable
                         if (hasVar(token)) {
                             // AMBIGUITY CHECK
@@ -2310,7 +2310,7 @@ export class VariableManager {
                                     // isValidString checks chars.
                                     return {
                                         type: "error",
-                                        message: `Ambiguous reference '${token}'. It is both a variable and a valid number in ${this.inputBase.name}. Use @${token} for variable or 0D${token} (or 0${BaseSystem.getPrefixForSystem(this.inputBase) || 'd'}${token}) for number.`
+                                        message: `Ambiguous reference '${token}'. It is both a variable and a valid number in ${this.inputBase.name}. Use @${token} for variable or 0z[10]${token} (or 0${BaseSystem.getPrefixForSystem(this.inputBase) || 'd'}${token}) for number.`
                                     };
                                 }
                             }
@@ -2474,10 +2474,10 @@ export class VariableManager {
             str = value.toString();
         }
 
-        // Prefix with 0d if it's a numeric string and not already prefixed
+        // Prefix with 0z[10] if it's a numeric string and not already prefixed
         // We handle negatives by putting the prefix after the sign
-        if (/^-?[\d./]+$/.test(str) && !str.includes("0d")) {
-            return str.replace(/^(-)?/, "$10d");
+        if (/^-?[\d./]+$/.test(str) && !str.includes("0z[10]")) {
+            return str.replace(/^(-)?/, "$10z[10]");
         }
 
         return str;
@@ -2819,7 +2819,7 @@ export class VariableManager {
         });
 
         // Freeze Numbers
-        const numRegex = /(?:^|[^a-zA-Z0-9_@])(\d+[a-zA-Z0-9.]*|0[dxob][a-zA-Z0-9.]+)/g;
+        const numRegex = /(?:^|[^a-zA-Z0-9_@])((?:0z\[\d+\])?[0-9][a-zA-Z0-9.]*|0[dxob][a-zA-Z0-9.]+)/g;
         staticExpr = staticExpr.replace(numRegex, (fullMatch, numStr, offset, string) => {
             // Check if part of placeholder?
             if (fullMatch.includes("__STR_")) return fullMatch;
@@ -2871,9 +2871,9 @@ export class VariableManager {
             this.decorations.set(normalizedName, new Map());
         }
         // Store value with original display name
-        this.decorations.get(normalizedName).set(normalizedProp, { 
-            value: value, 
-            displayName: propName 
+        this.decorations.get(normalizedName).set(normalizedProp, {
+            value: value,
+            displayName: propName
         });
     }
 
@@ -2934,7 +2934,7 @@ export class VariableManager {
         const normalizedName = this.normalizeName(name);
         const rawMap = this.decorations.get(normalizedName);
         if (!rawMap) return undefined;
-        
+
         // Convert to display format
         const result = new Map();
         for (const [normalizedKey, entry] of rawMap) {

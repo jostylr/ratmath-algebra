@@ -9,7 +9,7 @@ describe("VariableManager Advanced Scope & Strictness", () => {
     beforeEach(() => {
         // Ensure critical prefixes are registered (fix for test interference)
         if (!BaseSystem.getSystemForPrefix("d")) {
-            BaseSystem.registerPrefix("d", BaseSystem.DECIMAL);
+            BaseSystem.registerPrefix("d", BaseSystem.DUODECIMAL);
         }
         if (!BaseSystem.getSystemForPrefix("x")) {
             BaseSystem.registerPrefix("x", BaseSystem.HEXADECIMAL);
