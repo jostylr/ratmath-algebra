@@ -427,6 +427,662 @@ export class VariableManager {
         this.inputBase = baseSystem;
     }
 
+    static BASE_RESERVED_CHARS = new Set([".", "/", "#", "~", "_", "^", "+", "-"]);
+    static SAFE_UNQUOTED_BASE_CHARS = /[0-9A-Za-z@&./#~_^+-]/;
+    static DEFAULT_BASE_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@&";
+    static BASE_MODE_ALIASES = new Map([
+        ["mixed", 1], ["..", 1],
+        ["repeat", 2], [".", 2], ["#", 2], ["radix", 2],
+        ["cf", 3], [".~", 3],
+        ["cf_explicit", 4], ["~", 4],
+        ["shifted", 5], ["_^", 5], ["^", 5],
+        ["fraction", 6], ["/", 6], ["improper", 6],
+    ]);
+    static BASE_EXPANSION_LIMIT = 20;
+
+    _toRationalValue(value) {
+        if (value instanceof Integer) return value.toRational();
+        if (value instanceof Rational) return value;
+        if (value instanceof RationalInterval) {
+            if (value.low.equals(value.high)) return value.low;
+            throw new Error("Expected a single numeric value, not an interval");
+        }
+        throw new Error("Expected a numeric value");
+    }
+
+    _stringLiteralValue(src) {
+        if (typeof src !== "string" || src.length < 2 || src[0] !== '"' || src[src.length - 1] !== '"') {
+            throw new Error("Expected a quoted string");
+        }
+        return src
+            .substring(1, src.length - 1)
+            .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, "\\");
+    }
+
+    _groupDigits(intStr) {
+        if (!intStr) return intStr;
+        const sign = intStr.startsWith("-") ? "-" : "";
+        const body = sign ? intStr.substring(1) : intStr;
+        if (body.length <= 3) return intStr;
+        let out = "";
+        for (let i = 0; i < body.length; i++) {
+            if (i > 0 && (body.length - i) % 3 === 0) out += "_";
+            out += body[i];
+        }
+        return sign + out;
+    }
+
+    _groupDigitRuns(text, baseSystem) {
+        if (!text) return text;
+        let out = "";
+        let run = "";
+        const flush = () => {
+            if (!run.length) return;
+            if (run.length <= 3) {
+                out += run;
+            } else {
+                for (let i = 0; i < run.length; i++) {
+                    if (i > 0 && i % 3 === 0) out += "_";
+                    out += run[i];
+                }
+            }
+            run = "";
+        };
+        for (const ch of text) {
+            if (baseSystem.charMap.has(ch)) {
+                run += ch;
+            } else {
+                flush();
+                out += ch;
+            }
+        }
+        flush();
+        return out;
+    }
+
+    _shortenRepeatingExpansion(expansion, limit = VariableManager.BASE_EXPANSION_LIMIT) {
+        if (typeof expansion !== "string") return expansion;
+
+        if (!expansion.includes("#")) {
+            if (expansion.length > limit + 2) {
+                const dotIndex = expansion.indexOf(".");
+                if (dotIndex !== -1 && expansion.length - dotIndex - 1 > limit) {
+                    return expansion.substring(0, dotIndex + limit + 1) + "...";
+                }
+            }
+            return expansion;
+        }
+
+        if (expansion.endsWith("#0")) {
+            const withoutRepeating = expansion.substring(0, expansion.length - 2);
+            if (withoutRepeating.length > limit + 2) {
+                const dotIndex = withoutRepeating.indexOf(".");
+                if (dotIndex !== -1 && withoutRepeating.length - dotIndex - 1 > limit) {
+                    return withoutRepeating.substring(0, dotIndex + limit + 1) + "...";
+                }
+            }
+            return withoutRepeating;
+        }
+
+        if (expansion.length > limit + 2) {
+            const hashIndex = expansion.indexOf("#");
+            const beforeHash = expansion.substring(0, hashIndex);
+            const afterHash = expansion.substring(hashIndex + 1);
+
+            if (beforeHash.length > limit + 1) {
+                return beforeHash.substring(0, limit + 1) + "...";
+            }
+
+            const remainingSpace = limit + 2 - beforeHash.length;
+            if (remainingSpace <= 1) {
+                return beforeHash + "#...";
+            }
+            if (afterHash.length > remainingSpace - 1) {
+                return beforeHash + "#" + afterHash.substring(0, remainingSpace - 1) + "...";
+            }
+        }
+
+        return expansion;
+    }
+
+    _groupRadixExpansion(expansion, baseSystem) {
+        if (!expansion) return expansion;
+        const sign = expansion.startsWith("-") ? "-" : "";
+        const body = sign ? expansion.substring(1) : expansion;
+
+        const hashIndex = body.indexOf("#");
+        const beforeHash = hashIndex === -1 ? body : body.substring(0, hashIndex);
+        const afterHash = hashIndex === -1 ? null : body.substring(hashIndex + 1);
+
+        const dotIndex = beforeHash.indexOf(".");
+        const integerPart = dotIndex === -1 ? beforeHash : beforeHash.substring(0, dotIndex);
+        const fracPart = dotIndex === -1 ? null : beforeHash.substring(dotIndex + 1);
+
+        const groupedInteger = this._groupDigits(integerPart);
+        const groupedFrac = fracPart === null ? null : this._groupDigitRuns(fracPart, baseSystem);
+        const groupedRepeat = afterHash === null ? null : this._groupDigitRuns(afterHash, baseSystem);
+
+        let out = groupedInteger;
+        if (groupedFrac !== null) out += "." + groupedFrac;
+        if (groupedRepeat !== null) out += "#" + groupedRepeat;
+        return sign + out;
+    }
+
+    _parseBaseInteger(str, baseSystem, { allowSign = true } = {}) {
+        if (typeof str !== "string" || str.length === 0) {
+            throw new Error("Expected base integer digits");
+        }
+        let s = str;
+        let sign = 1n;
+        if (allowSign && (s.startsWith("-") || s.startsWith("+"))) {
+            sign = s[0] === "-" ? -1n : 1n;
+            s = s.substring(1);
+        }
+        if (s.length === 0) throw new Error("Missing digits");
+        if (s.startsWith("_") || s.endsWith("_")) throw new Error("Underscore cannot be leading or trailing");
+        if (s.includes("__")) throw new Error("Consecutive underscores are not allowed");
+        for (let i = 0; i < s.length; i++) {
+            const ch = s[i];
+            if (ch === "_") {
+                const prev = s[i - 1];
+                const next = s[i + 1];
+                if (!baseSystem.charMap.has(prev) || !baseSystem.charMap.has(next)) {
+                    throw new Error("Underscore separators must be between base digits");
+                }
+                continue;
+            }
+            if (!baseSystem.charMap.has(ch)) {
+                throw new Error(`Invalid digit '${ch}' for ${baseSystem.name}`);
+            }
+        }
+        const cleaned = s.replace(/_/g, "");
+        const value = baseSystem.toDecimal(cleaned);
+        return sign * value;
+    }
+
+    _parseSimpleBaseNumeral(str, baseSystem) {
+        let s = str;
+        let sign = 1n;
+        if (s.startsWith("-") || s.startsWith("+")) {
+            sign = s[0] === "-" ? -1n : 1n;
+            s = s.substring(1);
+        }
+        if (s.length === 0) throw new Error("Missing digits");
+        const dotParts = s.split(".");
+        if (dotParts.length > 2) throw new Error("Too many radix points");
+        const intPart = dotParts[0] === "" ? "0" : dotParts[0];
+        const fracPart = dotParts.length === 2 ? dotParts[1] : "";
+        const intVal = this._parseBaseInteger(intPart, baseSystem, { allowSign: false });
+        let result = new Rational(intVal, 1n);
+        if (fracPart.length > 0) {
+            const fracVal = this._parseBaseInteger(fracPart, baseSystem, { allowSign: false });
+            const denom = BigInt(baseSystem.base) ** BigInt(fracPart.replace(/_/g, "").length);
+            const fracRat = new Rational(fracVal, denom);
+            result = result.add(fracRat);
+        }
+        if (sign < 0n) result = result.negate();
+        return result;
+    }
+
+    _continuedFractionFromTerms(terms) {
+        if (!terms.length) throw new Error("Continued fraction requires at least one term");
+        let acc = new Rational(terms[terms.length - 1], 1n);
+        for (let i = terms.length - 2; i >= 0; i--) {
+            if (acc.numerator === 0n) throw new Error("Invalid continued fraction term");
+            acc = new Rational(terms[i], 1n).add(new Rational(1, 1).divide(acc));
+        }
+        return acc;
+    }
+
+    fromBaseString(baseStr, baseSystem) {
+        if (typeof baseStr !== "string") throw new Error("FROMBASE expects a string input");
+        let s = baseStr.trim();
+        if (!s.length) throw new Error("Empty base numeral");
+
+        if (s.startsWith("_")) throw new Error("Underscore cannot start a number");
+
+        let expShift = null;
+        const shiftIndex = s.indexOf("_^");
+        if (shiftIndex !== -1) {
+            if (s.indexOf("_^", shiftIndex + 2) !== -1) throw new Error("Only one _^ is allowed");
+            if (s.includes("#") && shiftIndex < s.indexOf("#")) throw new Error("Radix shift must come after repeating section");
+            expShift = s.substring(shiftIndex + 2);
+            s = s.substring(0, shiftIndex);
+            if (!expShift.length) throw new Error("Missing exponent after _^");
+        }
+
+        if (s.includes("~") && !s.includes(".~") && !s.startsWith("~")) {
+            throw new Error("~ is only valid in continued fractions after .~");
+        }
+
+        let value;
+        if (s.includes(".~")) {
+            const explicit = s.startsWith("~");
+            if (explicit) s = s.substring(1);
+            const idx = s.indexOf(".~");
+            const a0 = s.substring(0, idx);
+            const tail = s.substring(idx + 2);
+            if (!tail.length) throw new Error("Continued fraction requires terms after .~");
+            const termStrs = [a0, ...tail.split("~")];
+            if (termStrs.some((t) => t.length === 0)) throw new Error("Invalid continued fraction format");
+            const terms = termStrs.map((t, i) => this._parseBaseInteger(t, baseSystem, { allowSign: i === 0 }));
+            value = this._continuedFractionFromTerms(terms);
+            if (explicit && terms[0] >= 0n) {
+                // explicit form is representational only; numeric value is unchanged
+            }
+        } else if (s.includes("..")) {
+            const parts = s.split("..");
+            if (parts.length !== 2) throw new Error("Mixed number must have exactly one '..'");
+            const whole = this._parseBaseInteger(parts[0], baseSystem, { allowSign: true });
+            const fracParts = parts[1].split("/");
+            if (fracParts.length !== 2) throw new Error("Mixed number requires Y/Z fractional part");
+            if (fracParts[0].includes(".") || fracParts[1].includes(".")) {
+                throw new Error("Mixed number fraction parts cannot contain radix points");
+            }
+            const num = this._parseBaseInteger(fracParts[0], baseSystem, { allowSign: false });
+            const den = this._parseBaseInteger(fracParts[1], baseSystem, { allowSign: false });
+            if (den === 0n) throw new Error("Denominator cannot be zero");
+            let frac = new Rational(num, den);
+            if (whole < 0n) frac = frac.negate();
+            value = new Rational(whole, 1n).add(frac);
+        } else if (s.includes("/")) {
+            const parts = s.split("/");
+            if (parts.length !== 2) throw new Error("Fraction must have exactly one '/'");
+            if (parts[0].includes(".") || parts[1].includes(".")) {
+                throw new Error("Fraction parts cannot contain radix points");
+            }
+            const num = this._parseBaseInteger(parts[0], baseSystem, { allowSign: true });
+            const den = this._parseBaseInteger(parts[1], baseSystem, { allowSign: false });
+            if (den === 0n) throw new Error("Denominator cannot be zero");
+            value = new Rational(num, den);
+            value._explicitFraction = true;
+        } else if (s.includes("#")) {
+            const parts = s.split("#");
+            if (parts.length !== 2) throw new Error("Repeating form must have exactly one '#'");
+            const prefix = parts[0];
+            const repeat = parts[1];
+            if (!repeat.length) throw new Error("Repeating block after # cannot be empty");
+            if (repeat.includes(".") || repeat.includes("/") || repeat.includes("~") || repeat.includes("#")) {
+                throw new Error("Repeating block must be plain digits");
+            }
+            const sign = prefix.startsWith("-") ? -1n : 1n;
+            const unsignedPrefix = (prefix.startsWith("-") || prefix.startsWith("+")) ? prefix.substring(1) : prefix;
+            const dot = unsignedPrefix.indexOf(".");
+            const intStr = dot === -1 ? unsignedPrefix : unsignedPrefix.substring(0, dot);
+            const nonRep = dot === -1 ? "" : unsignedPrefix.substring(dot + 1);
+            const intVal = this._parseBaseInteger(intStr || "0", baseSystem, { allowSign: false });
+            const nonRepVal = nonRep.length ? this._parseBaseInteger(nonRep, baseSystem, { allowSign: false }) : 0n;
+            const repVal = this._parseBaseInteger(repeat, baseSystem, { allowSign: false });
+            const B = BigInt(baseSystem.base);
+            const m = BigInt(nonRep.replace(/_/g, "").length);
+            const r = BigInt(repeat.replace(/_/g, "").length);
+            let result = new Rational(intVal, 1n);
+            if (m > 0n) result = result.add(new Rational(nonRepVal, B ** m));
+            const repDen = (B ** m) * (B ** r - 1n);
+            result = result.add(new Rational(repVal, repDen));
+            value = sign < 0n ? result.negate() : result;
+        } else {
+            value = this._parseSimpleBaseNumeral(s, baseSystem);
+        }
+
+        if (expShift !== null) {
+            const shift = this._parseBaseInteger(expShift, baseSystem, { allowSign: true });
+            const B = new Rational(BigInt(baseSystem.base), 1n);
+            const factor = shift >= 0n ? B.pow(shift) : new Rational(1, 1).divide(B.pow(-shift));
+            value = value.multiply(factor);
+        }
+
+        if (value.denominator === 1n) return new Integer(value.numerator);
+        return value;
+    }
+
+    _resolveBaseSpecValue(baseSpecValue) {
+        const ensureReservedChars = (baseSystem) => {
+            for (const ch of baseSystem.characters) {
+                if (VariableManager.BASE_RESERVED_CHARS.has(ch)) {
+                    throw new Error(`Base digit '${ch}' is reserved and cannot be used in a digit alphabet`);
+                }
+            }
+            return baseSystem;
+        };
+        if (baseSpecValue && baseSpecValue.type === "string") {
+            const digits = baseSpecValue.value;
+            return ensureReservedChars(new BaseSystem(Array.from(digits), `Custom Base ${Array.from(digits).length}`));
+        }
+        if (typeof baseSpecValue === "string") {
+            return ensureReservedChars(new BaseSystem(Array.from(baseSpecValue), `Custom Base ${Array.from(baseSpecValue).length}`));
+        }
+        if (baseSpecValue instanceof Integer || baseSpecValue instanceof Rational) {
+            const n = baseSpecValue instanceof Integer ? baseSpecValue.value : baseSpecValue.numerator;
+            const d = baseSpecValue instanceof Rational ? baseSpecValue.denominator : 1n;
+            if (d !== 1n) throw new Error("Base number must be an integer");
+            const baseNum = Number(n);
+            if (!Number.isInteger(baseNum) || baseNum < 2 || baseNum > 64) {
+                throw new Error("Base number must be an integer between 2 and 64");
+            }
+            return ensureReservedChars(BaseSystem.fromBase(baseNum));
+        }
+        throw new Error("Invalid base specification");
+    }
+
+    _resolveBaseSpecText(baseSpecText, scopeChain = [new Map()]) {
+        const spec = baseSpecText.trim();
+        const prefixMatch = spec.match(/^0([A-Za-z])$/);
+        if (prefixMatch) {
+            const bs = BaseSystem.getSystemForPrefix(prefixMatch[1]);
+            if (!bs) throw new Error(`Unknown base prefix '0${prefixMatch[1]}'`);
+            return bs;
+        }
+        if (spec.startsWith('"') && spec.endsWith('"')) {
+            return this._resolveBaseSpecValue({ type: "string", value: this._stringLiteralValue(spec) });
+        }
+        const tupleMatch = spec.match(/^\{\:\s*([^,]+)\s*,\s*("(?:(?:[^"\\]|\\.)*)")\s*\}$/);
+        if (tupleMatch) {
+            const radixEval = this.evaluateExpression(tupleMatch[1], scopeChain);
+            if (radixEval.type === "error") throw new Error(radixEval.message);
+            const digits = this._stringLiteralValue(tupleMatch[2]);
+            const base = this._resolveBaseSpecValue(radixEval.result);
+            const radix = base.base;
+            const cpLen = Array.from(digits).length;
+            if (radix !== cpLen) {
+                throw new Error(`Tuple base mismatch: radix ${radix} does not match digits length ${cpLen}`);
+            }
+            return this._resolveBaseSpecValue({ type: "string", value: digits });
+        }
+        const evalRes = this.evaluateExpression(spec, scopeChain);
+        if (evalRes.type === "error") throw new Error(evalRes.message);
+        return this._resolveBaseSpecValue(evalRes.result);
+    }
+
+    _resolveModeValue(modeValue) {
+        if (modeValue === undefined || modeValue === null) return 1;
+        if (modeValue && modeValue.type === "string") {
+            const mapped = VariableManager.BASE_MODE_ALIASES.get(modeValue.value.trim().toLowerCase());
+            if (!mapped) throw new Error(`Unknown formatting mode '${modeValue.value}'`);
+            return mapped;
+        }
+        if (typeof modeValue === "string") {
+            const mapped = VariableManager.BASE_MODE_ALIASES.get(modeValue.trim().toLowerCase());
+            if (!mapped) throw new Error(`Unknown formatting mode '${modeValue}'`);
+            return mapped;
+        }
+        if (modeValue instanceof Integer) return Number(modeValue.value);
+        if (modeValue instanceof Rational && modeValue.denominator === 1n) return Number(modeValue.numerator);
+        throw new Error("Formatting mode must be an integer or mode string");
+    }
+
+    _toBaseIntegerDigits(value, baseSystem) {
+        return this._groupDigits(baseSystem.fromDecimal(value));
+    }
+
+    _formatToBase(value, baseSystem, mode = 1) {
+        const rat = this._toRationalValue(value);
+        if (mode === 2) {
+            const raw = rat.toRepeatingBase(baseSystem);
+            const shortened = this._shortenRepeatingExpansion(raw);
+            return this._groupRadixExpansion(shortened, baseSystem);
+        }
+        if (mode === 3 || mode === 4) {
+            const cf = rat.toContinuedFraction();
+            const terms = cf.map((t) => baseSystem.fromDecimal(t));
+            if (terms.length === 1) return this._groupDigits(terms[0]);
+            const prefix = (mode === 4 || cf[0] < 0n) ? "~" : "";
+            return `${prefix}${this._groupDigits(terms[0])}.~${terms.slice(1).map((t) => this._groupDigits(t)).join("~")}`;
+        }
+        if (mode === 5) {
+            const raw = this._shortenRepeatingExpansion(rat.toRepeatingBase(baseSystem));
+            const sign = raw.startsWith("-") ? "-" : "";
+            const body = sign ? raw.substring(1) : raw;
+            const dot = body.indexOf(".");
+            const hash = body.indexOf("#");
+            const integer = dot === -1 ? (hash === -1 ? body : body.substring(0, hash)) : body.substring(0, dot);
+            const integerDigits = Array.from(integer).filter((ch) => baseSystem.charMap.has(ch)).length;
+            if (integer.length <= 1 && integer !== "0") {
+                return `${this._groupRadixExpansion(sign + body, baseSystem)}_^0`;
+            }
+            if (integer.length > 1) {
+                const shifted = `${integer[0]}.${integer.substring(1)}${dot === -1 ? (hash === -1 ? "" : body.substring(hash)) : body.substring(dot + 1)}`;
+                const groupedShifted = this._groupRadixExpansion(sign + shifted, baseSystem);
+                return `${groupedShifted}_^${integerDigits - 1}`;
+            }
+            return `${this._groupRadixExpansion(sign + body, baseSystem)}_^0`;
+        }
+        if (mode === 6) {
+            return `${this._toBaseIntegerDigits(rat.numerator, baseSystem)}/${this._toBaseIntegerDigits(rat.denominator, baseSystem)}`;
+        }
+        if (rat.denominator === 1n) {
+            return this._toBaseIntegerDigits(rat.numerator, baseSystem);
+        }
+        const sign = rat.numerator < 0n ? -1n : 1n;
+        const absNum = rat.numerator < 0n ? -rat.numerator : rat.numerator;
+        const whole = absNum / rat.denominator;
+        const rem = absNum % rat.denominator;
+        if (rem === 0n) return this._toBaseIntegerDigits(rat.numerator, baseSystem);
+        const wholeStr = this._toBaseIntegerDigits(sign < 0n ? -whole : whole, baseSystem);
+        const fracNum = this._toBaseIntegerDigits(rem, baseSystem);
+        const fracDen = this._toBaseIntegerDigits(rat.denominator, baseSystem);
+        return `${wholeStr}..${fracNum}/${fracDen}`;
+    }
+
+    _splitTopLevelBaseOp(expr, op) {
+        let depthParen = 0;
+        let depthBracket = 0;
+        let depthBrace = 0;
+        let inString = false;
+        for (let i = 0; i <= expr.length - op.length; i++) {
+            const ch = expr[i];
+            if (ch === '"') {
+                let bs = 0;
+                let j = i - 1;
+                while (j >= 0 && expr[j] === "\\") {
+                    bs++;
+                    j--;
+                }
+                if (bs % 2 === 0) inString = !inString;
+            }
+            if (inString) continue;
+            if (ch === "(") depthParen++;
+            else if (ch === ")") depthParen--;
+            else if (ch === "[") depthBracket++;
+            else if (ch === "]") depthBracket--;
+            else if (ch === "{") depthBrace++;
+            else if (ch === "}") depthBrace--;
+            if (depthParen === 0 && depthBracket === 0 && depthBrace === 0 && expr.startsWith(op, i)) {
+                return { left: expr.substring(0, i).trim(), right: expr.substring(i + op.length).trim() };
+            }
+        }
+        return null;
+    }
+
+    _evaluateBaseOperators(expression, scopeChain = [new Map()]) {
+        const splitTupleParts = (text) => {
+            const s = text.trim();
+            if (!(s.startsWith("(") && s.endsWith(")"))) return null;
+            const inner = s.substring(1, s.length - 1);
+            let depthParen = 0;
+            let depthBracket = 0;
+            let depthBrace = 0;
+            let inString = false;
+            for (let i = 0; i < inner.length; i++) {
+                const ch = inner[i];
+                if (ch === '"') {
+                    let bs = 0;
+                    let j = i - 1;
+                    while (j >= 0 && inner[j] === "\\") {
+                        bs++;
+                        j--;
+                    }
+                    if (bs % 2 === 0) inString = !inString;
+                    continue;
+                }
+                if (inString) continue;
+                if (ch === "(") depthParen++;
+                else if (ch === ")") depthParen--;
+                else if (ch === "[") depthBracket++;
+                else if (ch === "]") depthBracket--;
+                else if (ch === "{") depthBrace++;
+                else if (ch === "}") depthBrace--;
+                else if (ch === "," && depthParen === 0 && depthBracket === 0 && depthBrace === 0) {
+                    const left = inner.substring(0, i).trim();
+                    const right = inner.substring(i + 1).trim();
+                    if (!left || !right) return null;
+                    return { left, right };
+                }
+            }
+            return null;
+        };
+
+        const parseModeOrSpec = (specText) => {
+            const tuple = splitTupleParts(specText);
+            if (tuple) {
+                return { baseSpec: tuple.left, modeExpr: tuple.right };
+            }
+            if (specText.startsWith('"') && specText.endsWith('"')) {
+                const modeMaybe = this._stringLiteralValue(specText).trim().toLowerCase();
+                if (VariableManager.BASE_MODE_ALIASES.has(modeMaybe)) {
+                    return { baseSpec: "10", modeExpr: specText };
+                }
+            }
+            return { baseSpec: specText, modeExpr: null };
+        };
+
+        const fromSplit = this._splitTopLevelBaseOp(expression, "<_");
+        if (fromSplit) {
+            const leftEval = this.evaluateExpression(fromSplit.left, scopeChain);
+            if (leftEval.type === "error") throw new Error(leftEval.message);
+            const input = leftEval.result?.type === "string" ? leftEval.result.value : leftEval.result;
+            if (typeof input !== "string") throw new Error("<_ expects a string on the left");
+            const baseSystem = this._resolveBaseSpecText(fromSplit.right, scopeChain);
+            return this.fromBaseString(input, baseSystem);
+        }
+
+        const toSplit = this._splitTopLevelBaseOp(expression, "_>");
+        if (toSplit) {
+            const leftEval = this.evaluateExpression(toSplit.left, scopeChain);
+            if (leftEval.type === "error") throw new Error(leftEval.message);
+            const { baseSpec, modeExpr } = parseModeOrSpec(toSplit.right);
+            const baseSystem = this._resolveBaseSpecText(baseSpec, scopeChain);
+            let mode = 1;
+            if (modeExpr) {
+                const modeEval = this.evaluateExpression(modeExpr, scopeChain);
+                if (modeEval.type === "error") throw new Error(modeEval.message);
+                mode = this._resolveModeValue(modeEval.result);
+            }
+            const baseStr = this._formatToBase(leftEval.result, baseSystem, mode);
+            return { type: "string", value: baseStr };
+        }
+
+        return null;
+    }
+
+    _normalizePrefixedBaseLiterals(expression) {
+        let out = "";
+        let i = 0;
+        while (i < expression.length) {
+            const ch = expression[i];
+            if (ch === '"' || (ch === "0" && i + 1 < expression.length && /[A-Z]/.test(expression[i + 1]))) {
+                if (ch === '"') {
+                    out += ch;
+                    i++;
+                    while (i < expression.length) {
+                        out += expression[i];
+                        if (expression[i] === '"') {
+                            let bs = 0;
+                            let j = i - 1;
+                            while (j >= 0 && expression[j] === "\\") {
+                                bs++;
+                                j--;
+                            }
+                            if (bs % 2 === 0) {
+                                i++;
+                                break;
+                            }
+                        }
+                        i++;
+                    }
+                    continue;
+                }
+                const prefix = expression[i + 1];
+                const bs = BaseSystem.getSystemForPrefix(prefix);
+                if (!bs) {
+                    out += ch;
+                    i++;
+                    continue;
+                }
+                let j = i + 2;
+                let digitStream = "";
+                if (j < expression.length && expression[j] === '"') {
+                    let k = j + 1;
+                    let raw = "";
+                    let closed = false;
+                    while (k < expression.length) {
+                        if (expression[k] === '"') {
+                            let esc = 0;
+                            let p = k - 1;
+                            while (p >= j + 1 && expression[p] === "\\") {
+                                esc++;
+                                p--;
+                            }
+                            if (esc % 2 === 0) {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        raw += expression[k];
+                        k++;
+                    }
+                    if (closed) {
+                        digitStream = raw
+                            .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+                            .replace(/\\"/g, '"')
+                            .replace(/\\\\/g, "\\");
+                        j = k + 1;
+                    }
+                } else {
+                    while (j < expression.length && VariableManager.SAFE_UNQUOTED_BASE_CHARS.test(expression[j])) {
+                        digitStream += expression[j];
+                        j++;
+                    }
+                }
+                if (!digitStream.length) {
+                    out += ch;
+                    i++;
+                    continue;
+                }
+                const parsed = this.fromBaseString(digitStream, bs);
+                out += this.formatValueWithPrefix(parsed);
+                i = j;
+                continue;
+            }
+            out += ch;
+            i++;
+        }
+        return out;
+    }
+
+    defineBasePrefix(prefixLetter, rhsExpression) {
+        if (!/^[A-Z]$/.test(prefixLetter)) {
+            throw new Error("Base definitions require an uppercase prefix letter");
+        }
+        const hasExactPrefix = typeof BaseSystem.hasExactPrefix === "function"
+            ? BaseSystem.hasExactPrefix(prefixLetter)
+            : !!BaseSystem.getSystemForPrefix(prefixLetter);
+        if (hasExactPrefix) {
+            throw new Error(`Base prefix 0${prefixLetter} is already defined`);
+        }
+        const baseSystem = this._resolveBaseSpecText(rhsExpression, [new Map()]);
+        for (const ch of baseSystem.characters) {
+            if (VariableManager.BASE_RESERVED_CHARS.has(ch)) {
+                throw new Error(`Base digit '${ch}' is reserved and cannot be used in a digit alphabet`);
+            }
+        }
+        BaseSystem.registerPrefix(prefixLetter, baseSystem);
+        this.customBases.set(prefixLetter, baseSystem);
+        return new Integer(1n);
+    }
+
     /**
      * Preprocess expression to convert numbers from input base to decimal
      * Only converts bare numbers, preserves explicit base notation like 101[2]
@@ -645,6 +1301,18 @@ export class VariableManager {
     processInput(input) {
         try {
             const trimmed = input.trim();
+
+            // Base definition assignment: 0A = "..." or 0A := {: 16, "..."}
+            const baseDefMatch = trimmed.match(/^0([A-Z])\s*(?::=|=)\s*(.+)$/);
+            if (baseDefMatch) {
+                const [, prefixLetter, rhs] = baseDefMatch;
+                const result = this.defineBasePrefix(prefixLetter, rhs);
+                return {
+                    type: "assignment",
+                    result,
+                    message: `Defined base prefix 0${prefixLetter}`,
+                };
+            }
 
             // 1. Function Definition: Name(args) -> body
             // Matches: FuncName(args) -> body
@@ -2351,8 +3019,14 @@ export class VariableManager {
             }
 
             const preprocessed = this.preprocessExpression(finalExpr);
+            const normalizedBases = this._normalizePrefixedBaseLiterals(preprocessed);
 
-            const specialMatch = preprocessed.match(
+            const baseOpValue = this._evaluateBaseOperators(normalizedBases, scopeChain);
+            if (baseOpValue !== null) {
+                return { type: "expression", result: baseOpValue };
+            }
+
+            const specialMatch = normalizedBases.match(
                 /^(SUM|PROD|SEQ)\[([a-zA-Z])\]\(([^,]+),\s*([^,]+),\s*([^,]+)(?:,\s*([^)]+))?\)$/,
             );
             if (specialMatch) {
@@ -2361,7 +3035,7 @@ export class VariableManager {
             }
 
             // Check if the entire expression is just a string literal
-            const stringLiteralMatch = preprocessed.match(/^"((?:[^"\\]|\\.)*)"\s*$/);
+            const stringLiteralMatch = normalizedBases.match(/^"((?:[^"\\]|\\.)*)"\s*$/);
             if (stringLiteralMatch) {
                 // Unescape the string and return it directly
                 const unescaped = stringLiteralMatch[1]
@@ -2374,7 +3048,7 @@ export class VariableManager {
 
             let result;
             try {
-                result = Parser.parse(preprocessed, {
+                result = Parser.parse(normalizedBases, {
                     typeAware: true,
                     customBases: this.customBases,
                     inputBase: this.inputBase
@@ -2385,7 +3059,7 @@ export class VariableManager {
                 // console.error("Original error:", parseError.message);
 
                 // HOC fallback
-                const trimmed = preprocessed.trim();
+                const trimmed = normalizedBases.trim();
                 const tokens = trimmed.split(/[^a-zA-Z0-9@_]/).filter(t => t.length > 0);
                 for (const token of tokens) {
                     const rawName = token.startsWith("@@") ? token : (token.startsWith("@") ? token.substring(1) : token);
